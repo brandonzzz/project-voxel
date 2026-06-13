@@ -1,0 +1,8 @@
+# Project place file
+/Fable 5 Voxel Terrain Project.rbxlx
+
+# Roblox Studio lock files
+/*.rbxlx.lock
+/*.rbxl.lock
+
+sourcemap.json
