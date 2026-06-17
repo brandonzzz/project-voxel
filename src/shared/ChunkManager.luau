@@ -47,6 +47,7 @@ export type Options = {
 	farOpsPerFrame: number?, -- heavy ops/frame at/beyond farDist (< 1 = idle frames, fps-safe)
 	cy: number?,
 	hud: boolean?,
+	renderEnabled: boolean?, -- false => skip the terrain bake (render comes from the server), keep onBuilt
 	onBuilt: ((number, number) -> ())?,
 	onUnloaded: ((number, number) -> ())?,
 }
@@ -74,6 +75,7 @@ function ChunkManager.new(opts: Options)
 	self.frameBudget = (opts.frameBudgetMs or 5) / 1000
 	self.cy = opts.cy or 0
 	self.wantHud = opts.hud ~= false
+	self.renderEnabled = opts.renderEnabled ~= false -- default true; false when the server renders
 	self.onBuilt = opts.onBuilt
 	self.onUnloaded = opts.onUnloaded
 
@@ -264,8 +266,13 @@ end
 
 function ChunkManager:_buildOne(cx: number, cz: number)
 	self:ensureGenerated(cx, cz)
-	local stats = Mesher.rebuildChunk(self.store, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
-	self.lastBuildMs = stats.buildMs
+	-- When render is server-authoritative (Constants.SERVER_RENDER), the client skips its own terrain
+	-- bake (the heavy op -- meshes arrive from the server) but still streams the chunk so onBuilt can
+	-- build local collision + water.
+	if self.renderEnabled then
+		local stats = Mesher.rebuildChunk(self.store, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+		self.lastBuildMs = stats.buildMs
+	end
 	if self.onBuilt then
 		self.onBuilt(cx, cz)
 	end

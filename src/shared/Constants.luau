@@ -35,6 +35,12 @@ Constants.PAD_CELLS = 18 * 18 * 18
 -- only the sparse edit overlay is replicated.
 Constants.WORLD_SEED = 2026
 
+-- When true, the SERVER bakes terrain render meshes and delivers them per-player for the client to
+-- capture (clone) and display; the client skips its own terrain baking (still builds collision +
+-- water locally). When false, the client bakes its own render (the original path). Behind a flag so
+-- the two render paths are an A/B with instant fallback. See the server-render architecture findings.
+Constants.SERVER_RENDER = false
+
 -- Generation config. Lives here (not per-call) so the server and every client read
 -- the SAME parameters -> identical deterministic base terrain. Change here to retune.
 --   type      "default" (noise) | "flat" (constant height) | "void" (empty world)

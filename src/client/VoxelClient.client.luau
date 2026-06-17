@@ -84,6 +84,9 @@ manager = ChunkManager.new({
 	frameBudgetMs = 3,
 	maxConcurrent = 1,
 	cy = 0,
+	-- When the server renders (Constants.SERVER_RENDER), skip our own terrain bake -- meshes arrive
+	-- from the server and we capture them below. We still stream chunks for local collision + water.
+	renderEnabled = not Constants.SERVER_RENDER,
 	onBuilt = function(cx, cz)
 		-- Pace the collision+water rebuild onto its own gated frame so it doesn't pile onto the
 		-- frame that just ran the render bake/CreateMeshPartAsync (that stacking was the stutter).
@@ -136,6 +139,62 @@ WaterRender.startScroll(water)
 _G.VoxelChunkManager = manager
 _G.VoxelStore = store
 _G.VoxelWorldGen = gen
+
+-- Server-render capture (Constants.SERVER_RENDER): the server delivers each of our render-set chunks
+-- as a per-chunk folder into our PlayerGui (replicated only to us). Clone each into the world (our
+-- persistent copy that survives the server freeing its copy) and ack so the server frees it. A
+-- re-delivered (edited) chunk replaces our existing clone. The PlayerGui copies don't render (not in
+-- workspace); only our workspace clones do. See the server-render architecture findings.
+if Constants.SERVER_RENDER then
+	local serverRender = root:FindFirstChild("ServerRender")
+	if serverRender then
+		serverRender:Destroy()
+	end
+	serverRender = Instance.new("Folder")
+	serverRender.Name = "ServerRender"
+	serverRender.Parent = root
+
+	local captureAck = ReplicatedStorage:WaitForChild("VoxelRemotes"):WaitForChild("VoxelCaptureAck")
+
+	local function capture(chunkFolder: Instance)
+		if not chunkFolder:IsA("Folder") then
+			return
+		end
+		local cx, _cy, cz = string.match(chunkFolder.Name, "^C_(-?%d+)_(-?%d+)_(-?%d+)$")
+		if not cx then
+			return
+		end
+		task.wait() -- let the folder's part(s) finish replicating before we clone it
+		if not chunkFolder.Parent then
+			return -- server already freed it (shouldn't happen pre-ack, but be safe)
+		end
+		local existing = serverRender:FindFirstChild(chunkFolder.Name)
+		if existing then
+			existing:Destroy() -- replace a prior clone (re-delivery after an edit)
+		end
+		chunkFolder:Clone().Parent = serverRender
+		captureAck:FireServer(cx .. "_" .. cz)
+	end
+
+	local function watch(delivery: Instance)
+		delivery.ChildAdded:Connect(capture)
+		for _, ch in delivery:GetChildren() do
+			task.spawn(capture, ch)
+		end
+	end
+
+	-- the server creates VoxelDelivery under our PlayerGui on first delivery
+	local pg = player:WaitForChild("PlayerGui")
+	local existingDelivery = pg:FindFirstChild("VoxelDelivery")
+	if existingDelivery then
+		watch(existingDelivery)
+	end
+	pg.ChildAdded:Connect(function(ch)
+		if ch.Name == "VoxelDelivery" then
+			watch(ch)
+		end
+	end)
+end
 
 -- Drop the avatar in above the surface; M5 collision gives it ground to land on.
 local swimCleanup: (() -> ())? = nil

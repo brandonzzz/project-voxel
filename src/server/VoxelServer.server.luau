@@ -40,6 +40,11 @@ RequestExplode.Parent = remotes
 local GetOverlay = Instance.new("RemoteFunction")
 GetOverlay.Name = "GetOverlay"
 GetOverlay.Parent = remotes
+-- Client confirms it captured (cloned) a delivered render chunk; server then frees its copy. This is
+-- a receipt, not a load request -- the server still chooses what to deliver (SERVER_RENDER path).
+local CaptureAck = Instance.new("RemoteEvent")
+CaptureAck.Name = "VoxelCaptureAck"
+CaptureAck.Parent = remotes
 remotes.Parent = ReplicatedStorage
 
 -- Authoritative state -------------------------------------------------------
@@ -93,6 +98,9 @@ end
 -- Server-side collision streamer (assigned near the bottom once its module + deps exist).
 -- Forward-declared here so the edit / explosion handlers can mark its chunks dirty.
 local streamer: any = nil
+-- Server-side RENDER streamer (deliver-and-capture): bakes + delivers terrain meshes per-player.
+-- Forward-declared so edit/explosion handlers re-deliver changed chunks. Nil unless SERVER_RENDER.
+local renderStreamer: any = nil
 
 local function recordEdit(wx: number, wy: number, wz: number, value: number)
 	local cx, lx = VoxelStore.worldToChunk(wx)
@@ -139,10 +147,13 @@ RequestEdit.OnServerEvent:Connect(function(player, wx, wy, wz, material, byte1)
 	local delta = EditService.applyEdit(store, wx, wy, wz, material, byte1)
 	recordEdit(delta[1], delta[2], delta[3], delta[4])
 	EditDeltas:FireAllClients({ delta })
-	if streamer then
-		for _, c in EditService.affectedChunks(delta[1], delta[2], delta[3]) do
-			if c.cy == 0 then
+	for _, c in EditService.affectedChunks(delta[1], delta[2], delta[3]) do
+		if c.cy == 0 then
+			if streamer then
 				streamer:markDirty(c.cx, c.cz)
+			end
+			if renderStreamer then
+				renderStreamer:markDirty(c.cx, c.cz)
 			end
 		end
 	end
@@ -186,10 +197,13 @@ local function detonate(wx: number, wy: number, wz: number, radius: number)
 	end
 
 	EditDeltas:FireAllClients(deltas)
-	if streamer then
-		for ccx = c0x, c1x do
-			for ccz = c0z, c1z do
+	for ccx = c0x, c1x do
+		for ccz = c0z, c1z do
+			if streamer then
 				streamer:markDirty(ccx, ccz)
+			end
+			if renderStreamer then
+				renderStreamer:markDirty(ccx, ccz)
 			end
 		end
 	end
@@ -486,6 +500,26 @@ streamer = ServerChunkStreamer.new({
 	expandFn = LoosePartManager.expandLoaded, -- SC4: pull in chunks loose assemblies span into
 })
 streamer:start()
+
+-- Server-side RENDER streaming (deliver-and-capture, behind Constants.SERVER_RENDER): the server
+-- bakes each character's render-set terrain meshes and delivers them per-player via PlayerGui; the
+-- client clones each chunk + acks, and the server frees its copy on ack (resident set stays tiny).
+-- Collision + loose parts above are UNCHANGED (distance-streamed). See the architecture findings.
+if Constants.SERVER_RENDER then
+	local ServerRenderStreamer = require(script.Parent:WaitForChild("ServerRenderStreamer"))
+	renderStreamer = ServerRenderStreamer.new({
+		store = store,
+		ensureWorld = ensureWorld,
+		cy = 0,
+		radius = 6,
+	})
+	CaptureAck.OnServerEvent:Connect(function(player, key)
+		if typeof(key) == "string" then
+			renderStreamer:onAck(player, key)
+		end
+	end)
+	renderStreamer:start()
+end
 
 -- Periodic loose-part upkeep: park orphans (no collision under them) and keep each assembly's
 -- collision group in step with its network owner (client vs server).
