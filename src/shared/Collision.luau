@@ -32,6 +32,7 @@ local CHUNK = Constants.CHUNK
 local WATER = Constants.Material.Water
 local SOLID = Constants.Shape.Solid
 local unpackByte1 = Constants.unpackByte1
+local unpackCell = Constants.unpackCell
 
 local Collision = {}
 
@@ -65,23 +66,41 @@ local function lidx(lx: number, ly: number, lz: number): number
 	return lx + lz * CHUNK + ly * (CHUNK * CHUNK) + 1
 end
 
--- Local 16^3 boolean of "full solid cube" cells (material present, shape Solid). --
-local function buildCubeMask(store: VoxelStore.Store, cx: number, cy: number, cz: number): { boolean }
+export type Wedge = { lx: number, ly: number, lz: number, shape: number, geomO: number }
+
+-- ONE 16^3 pass over the chunk's own cells (via a fast pre-resolved reader, no per-cell getCell):
+-- builds the "full solid cube" mask AND collects wedge cells (shape + geomO). Replaces the previous
+-- TWO separate getCell scans (a cube-mask pass + a wedge-loop pass) -- the per-cell getCell overhead
+-- (worldToChunk + string chunkKey + table lookup) was the bulk of collision rebuild time. --
+local function scanChunk(store: VoxelStore.Store, cx: number, cy: number, cz: number): ({ boolean }, { Wedge })
+	local read = store:makeChunkReader(cx, cy, cz)
 	local mask = table.create(CHUNK * CHUNK * CHUNK, false)
+	local wedges: { Wedge } = {}
 	for ly = 0, CHUNK - 1 do
 		for lz = 0, CHUNK - 1 do
 			for lx = 0, CHUNK - 1 do
-				local mat, byte1 = store:getCell(cx * CHUNK + lx, cy * CHUNK + ly, cz * CHUNK + lz)
-				if mat ~= 0 and mat ~= WATER then
-					local shape = unpackByte1(byte1)
-					if shape == SOLID then
-						mask[lidx(lx, ly, lz)] = true
+				local raw = read(lx, ly, lz)
+				if raw ~= 0 then -- raw ~= 0 => material present (Empty packs to 0)
+					local mat, byte1 = unpackCell(raw)
+					if mat ~= WATER then
+						local shape, storedO = unpackByte1(byte1)
+						if shape == SOLID then
+							mask[lidx(lx, ly, lz)] = true
+						else
+							wedges[#wedges + 1] = {
+								lx = lx,
+								ly = ly,
+								lz = lz,
+								shape = shape,
+								geomO = Shape.geomOrientation(shape, storedO),
+							}
+						end
 					end
 				end
 			end
 		end
 	end
-	return mask
+	return mask, wedges
 end
 
 export type Box = { x0: number, y0: number, z0: number, x1: number, y1: number, z1: number }
@@ -172,7 +191,7 @@ function Collision.rebuildChunk(
 	local folder = Instance.new("Folder")
 	folder.Name = name
 
-	local mask = buildCubeMask(store, cx, cy, cz)
+	local mask, wedgeList = scanChunk(store, cx, cy, cz)
 	local boxes = Collision.greedyBoxes(mask)
 	for _, b in boxes do
 		local part = colliderPart()
@@ -188,28 +207,16 @@ function Collision.rebuildChunk(
 		part.Parent = folder
 	end
 
-	local wedges = 0
-	for ly = 0, CHUNK - 1 do
-		for lz = 0, CHUNK - 1 do
-			for lx = 0, CHUNK - 1 do
-				local mat, byte1 = store:getCell(cx * CHUNK + lx, cy * CHUNK + ly, cz * CHUNK + lz)
-				if mat ~= 0 and mat ~= WATER then
-					local shape, storedO = unpackByte1(byte1)
-					if shape ~= SOLID then
-						local geomO = Shape.geomOrientation(shape, storedO)
-						local clone = getTemplate(shape):Clone()
-						clone.CFrame = CFrame.new(
-							(cx * CHUNK + lx + 0.5) * CELL,
-							(cy * CHUNK + ly + 0.5) * CELL,
-							(cz * CHUNK + lz + 0.5) * CELL
-						) * CFrame.Angles(0, -geomO * (math.pi / 2), 0)
-						clone.Parent = folder
-						wedges += 1
-					end
-				end
-			end
-		end
+	for _, wg in wedgeList do
+		local clone = getTemplate(wg.shape):Clone()
+		clone.CFrame = CFrame.new(
+			(cx * CHUNK + wg.lx + 0.5) * CELL,
+			(cy * CHUNK + wg.ly + 0.5) * CELL,
+			(cz * CHUNK + wg.lz + 0.5) * CELL
+		) * CFrame.Angles(0, -wg.geomO * (math.pi / 2), 0)
+		clone.Parent = folder
 	end
+	local wedges = #wedgeList
 
 	-- Swap in the fresh folder, then destroy the old one (no collision gap).
 	folder.Parent = container

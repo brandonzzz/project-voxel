@@ -188,6 +188,29 @@ function VoxelStore.sampleValue(self: Store, wx: number, wy: number, wz: number)
 	return chunkGetRaw(chunk, localIndex(lx, ly, lz))
 end
 
+-- Fast reader for ONE chunk's own cells: pre-resolves the chunk (no per-cell worldToChunk, string
+-- chunkKey, or table lookup), returning (lx, ly, lz in 0..15) -> raw 16-bit value (0 if the chunk is
+-- absent). For chunk-local 16^3 scans (collision/water masks) this is far cheaper than getCell per
+-- cell. Uniform chunks return their fill directly; Mixed chunks read the buffer inline. --
+function VoxelStore.makeChunkReader(self: Store, cx: number, cy: number, cz: number): (number, number, number) -> number
+	local chunk = self.chunks[chunkKey(cx, cy, cz)]
+	if not chunk then
+		return function(): number
+			return 0
+		end
+	end
+	if chunk.state ~= FillState.Mixed then
+		local fill = chunk.fillValue
+		return function(): number
+			return fill
+		end
+	end
+	local buf = chunk.buf :: buffer
+	return function(lx: number, ly: number, lz: number): number
+		return buffer.readu16(buf, (lx + lz * CHUNK + ly * (CHUNK * CHUNK)) * 2)
+	end
+end
+
 -- Neighbour sampling ---------------------------------------------------------
 
 -- Map a local coord in -16..31 to (neighbourOffset -1..1, inChunkLocal 0..15).

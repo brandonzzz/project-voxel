@@ -32,6 +32,7 @@ local CHUNK = Constants.CHUNK
 local WATER = Constants.Material.Water
 local SHAPE = Constants.Shape
 local unpackByte1 = Constants.unpackByte1
+local unpackCell = Constants.unpackCell
 
 local WaterRender = {}
 
@@ -91,12 +92,13 @@ local function lidx(lx: number, ly: number, lz: number): number
 end
 
 local function waterMask(store, cx: number, cy: number, cz: number): { boolean }
+	local read = store:makeChunkReader(cx, cy, cz)
 	local mask = table.create(CHUNK * CHUNK * CHUNK, false)
 	for ly = 0, CHUNK - 1 do
 		for lz = 0, CHUNK - 1 do
 			for lx = 0, CHUNK - 1 do
-				local mat = store:getCell(cx * CHUNK + lx, cy * CHUNK + ly, cz * CHUNK + lz)
-				if mat == WATER then
+				local raw = read(lx, ly, lz)
+				if raw ~= 0 and unpackCell(raw) == WATER then
 					mask[lidx(lx, ly, lz)] = true
 				end
 			end
@@ -107,9 +109,13 @@ end
 
 -- Is cell N a slope whose face toward the water (direction dx,dz from water to N)
 -- leaves a gap? A fully covered face is a wall the water cannot flow past. --
-local function slopeOpenToward(store, nx: number, ny: number, nz: number, dx: number, dz: number): boolean
-	local mat, byte1 = store:getCell(nx, ny, nz)
-	if mat == 0 or mat == WATER then
+local function slopeOpenToward(sample, nx: number, ny: number, nz: number, dx: number, dz: number): boolean
+	local raw = sample(nx, ny, nz)
+	if raw == 0 then
+		return false
+	end
+	local mat, byte1 = unpackCell(raw)
+	if mat == WATER then
 		return false
 	end
 	local shape, storedO = unpackByte1(byte1)
@@ -125,11 +131,11 @@ end
 -- waterlogged if real water laps right against it -- this stops the flood from walking
 -- slope->slope along a connected chain (e.g. a crater rim) into cells with no water nearby,
 -- while still allowing single-bridge diagonal shorelines (their water is 1 cell away). --
-local function waterNearby(store, x: number, y: number, z: number): boolean
+local function waterNearby(sample, x: number, y: number, z: number): boolean
 	for ax = -1, 1 do
 		for ay = -1, 1 do
 			for az = -1, 1 do
-				if (ax ~= 0 or ay ~= 0 or az ~= 0) and store:getCell(x + ax, y + ay, z + az) == WATER then
+				if (ax ~= 0 or ay ~= 0 or az ~= 0) and unpackCell(sample(x + ax, y + ay, z + az)) == WATER then
 					return true
 				end
 			end
@@ -155,6 +161,16 @@ local function waterlogMask(store, cx: number, cy: number, cz: number): { [numbe
 		return x .. "_" .. y .. "_" .. z
 	end
 
+	-- Pre-resolve the 3x3x3 neighbour chunks once. The flood stays within +-BORDER (XZ) / -VDOWN (Y)
+	-- of the chunk -- well inside one neighbour (<= 16) -- so a chunk-relative neighbour sampler can
+	-- replace per-cell getCell (no worldToChunk / string chunkKey / table lookup per call). `sample`
+	-- takes WORLD cell coords and returns the raw 16-bit value (0 outside / absent), like getCell.
+	local sampler = store:makeNeighborSampler(cx, cy, cz)
+	local ox, oy, oz = cx * CHUNK, cy * CHUNK, cz * CHUNK
+	local function sample(wx: number, wy: number, wz: number): number
+		return sampler(wx - ox, wy - oy, wz - oz)
+	end
+
 	-- seed: water cells in the chunk + a one-cell shell (enough to catch water lapping
 	-- in from neighbours; the fill then runs inward onto slopes).
 	local sx0, sx1 = cx * CHUNK - 1, cx * CHUNK + CHUNK
@@ -163,7 +179,7 @@ local function waterlogMask(store, cx: number, cy: number, cz: number): { [numbe
 	for wy = sy0, sy1 do
 		for wz = sz0, sz1 do
 			for wx = sx0, sx1 do
-				if (store:getCell(wx, wy, wz)) == WATER then
+				if unpackCell(sample(wx, wy, wz)) == WATER then
 					local k = vkey(wx, wy, wz)
 					if not visited[k] then
 						visited[k] = true
@@ -185,19 +201,19 @@ local function waterlogMask(store, cx: number, cy: number, cz: number): { [numbe
 				local nx, ny, nz = cw + d.dx, ch + dy, cd + d.dz
 				if nx >= minX and nx <= maxX and nz >= minZ and nz <= maxZ and ny >= minY and ny <= maxY then
 					local k = vkey(nx, ny, nz)
-					if not visited[k] and slopeOpenToward(store, nx, ny, nz, d.dx, d.dz) then
+					if not visited[k] and slopeOpenToward(sample, nx, ny, nz, d.dx, d.dz) then
 						local ok = true
 						if dy == -1 then
 							-- to spill down onto N, the cell directly above it must not be a
 							-- full solid cube (that would wall the water off above N).
-							local am, ab = store:getCell(nx, ny + 1, nz)
+							local am, ab = unpackCell(sample(nx, ny + 1, nz))
 							if am ~= 0 and am ~= WATER and unpackByte1(ab) == SHAPE.Solid then
 								ok = false
 							end
 						end
 						-- ...and only if real water actually laps against this cell, so the flood
 						-- can't chain slope->slope into water-less cells (the crater-rim bug).
-						if ok and waterNearby(store, nx, ny, nz) then
+						if ok and waterNearby(sample, nx, ny, nz) then
 							visited[k] = true
 							qn += 1
 							queue[qn] = { nx, ny, nz }
