@@ -35,9 +35,11 @@ local VoxelStore = require(script.Parent.VoxelStore)
 
 local S = Constants.Shape
 local WATER = Constants.Material.Water
+local CHUNK = Constants.CHUNK
 local unpackByte1 = Constants.unpackByte1
 local packByte1 = Constants.packByte1
 local packCell = Constants.packCell
+local unpackCell = Constants.unpackCell
 
 local Autowedge = {}
 
@@ -65,8 +67,9 @@ local CW_GEOM = { ["1_1"] = 2, ["1_-1"] = 1, ["-1_-1"] = 0, ["-1_1"] = 3 }
 -- open DIAGONAL (dx,dz) -> InverseCornerWedge geom (sliced top corner faces it)
 local ICW_GEOM = { ["-1_-1"] = 0, ["1_-1"] = 1, ["1_1"] = 2, ["-1_1"] = 3 }
 
-local function matAt(store: VoxelStore.Store, wx: number, wy: number, wz: number): number
-	return (store:getCell(wx, wy, wz))
+-- `read(wx,wy,wz) -> (mat, byte1)`; matAt returns just the material.
+local function matAt(read: (number, number, number) -> (number, number), wx: number, wy: number, wz: number): number
+	return (read(wx, wy, wz))
 end
 local function isSolidMat(m: number): boolean
 	return m ~= 0 and m ~= WATER -- non-empty, non-water terrain
@@ -78,22 +81,36 @@ local function isOpen(m: number): boolean
 end
 
 -- Decide the new (shape, geometricOrientation) for a cell, or nil for no change. --
-function Autowedge.decide(store: VoxelStore.Store, wx: number, wy: number, wz: number): (number?, number?)
-	local mat, byte1 = store:getCell(wx, wy, wz)
+function Autowedge.decide(
+	store: VoxelStore.Store,
+	wx: number,
+	wy: number,
+	wz: number,
+	read: ((number, number, number) -> (number, number))?
+): (number?, number?)
+	-- All cell reads go through `rd` so a caller (region) can pass a fast pre-resolved neighbour
+	-- sampler instead of per-cell store:getCell. Defaults to getCell when omitted (e.g. tests).
+	local rd = read
+	if not rd then
+		rd = function(x: number, y: number, z: number)
+			return store:getCell(x, y, z)
+		end
+	end
+	local mat, byte1 = rd(wx, wy, wz)
 	if not isSolidMat(mat) then
 		return nil
 	end
 	if unpackByte1(byte1) ~= S.Solid then
 		return nil -- only Solid cubes are candidates (idempotent on a re-pass)
 	end
-	if not isOpen(matAt(store, wx, wy + 1, wz)) then
+	if not isOpen(matAt(rd, wx, wy + 1, wz)) then
 		return nil -- not a surface cell (solid directly above); water above is allowed
 	end
 
 	local open: { [string]: boolean } = {}
 	local openCount = 0
 	for _, d in DIRS do
-		if isOpen(matAt(store, wx + d.dx, wy, wz + d.dz)) then
+		if isOpen(matAt(rd, wx + d.dx, wy, wz + d.dz)) then
 			open[dkey(d.dx, d.dz)] = true
 			openCount += 1
 		end
@@ -148,9 +165,9 @@ function Autowedge.decide(store: VoxelStore.Store, wx: number, wy: number, wz: n
 		for _, dg in diagonals do
 			local dx, dz = dg[1], dg[2]
 			if
-				isOpen(matAt(store, wx + dx, wy, wz + dz)) -- diagonal is a drop-off (or water)
-				and not isOpen(matAt(store, wx + dx, wy, wz)) -- flanking orthogonal filled
-				and not isOpen(matAt(store, wx, wy, wz + dz)) -- flanking orthogonal filled
+				isOpen(matAt(rd, wx + dx, wy, wz + dz)) -- diagonal is a drop-off (or water)
+				and not isOpen(matAt(rd, wx + dx, wy, wz)) -- flanking orthogonal filled
+				and not isOpen(matAt(rd, wx, wy, wz + dz)) -- flanking orthogonal filled
 			then
 				shape, geom = S.InverseCornerWedge, ICW_GEOM[dkey(dx, dz)]
 				break
@@ -174,11 +191,36 @@ function Autowedge.region(
 	if not Autowedge.ENABLED then
 		return {}
 	end
+	-- Fast read: when the whole region lies in ONE chunk (the common per-chunk generation case),
+	-- decide's +-1 neighbour reads all fit a pre-resolved neighbour sampler -- far cheaper than
+	-- per-cell store:getCell (worldToChunk + string chunkKey + table lookup each). A multi-chunk
+	-- region (e.g. a crater) falls back to getCell. (worldToChunk returns chunkCoord first, so the
+	-- == comparisons test "same chunk" along each axis.)
+	local read: (number, number, number) -> (number, number)
+	if
+		VoxelStore.worldToChunk(minX) == VoxelStore.worldToChunk(maxX)
+		and VoxelStore.worldToChunk(minY) == VoxelStore.worldToChunk(maxY)
+		and VoxelStore.worldToChunk(minZ) == VoxelStore.worldToChunk(maxZ)
+	then
+		local cx = VoxelStore.worldToChunk(minX)
+		local cy = VoxelStore.worldToChunk(minY)
+		local cz = VoxelStore.worldToChunk(minZ)
+		local sampler = store:makeNeighborSampler(cx, cy, cz)
+		local ox, oy, oz = cx * CHUNK, cy * CHUNK, cz * CHUNK
+		read = function(wx: number, wy: number, wz: number)
+			return unpackCell(sampler(wx - ox, wy - oy, wz - oz))
+		end
+	else
+		read = function(wx: number, wy: number, wz: number)
+			return store:getCell(wx, wy, wz)
+		end
+	end
+
 	local decisions: { { number } } = {}
 	for wy = minY, maxY do
 		for wz = minZ, maxZ do
 			for wx = minX, maxX do
-				local shape, geom = Autowedge.decide(store, wx, wy, wz)
+				local shape, geom = Autowedge.decide(store, wx, wy, wz, read)
 				if shape then
 					decisions[#decisions + 1] = { wx, wy, wz, shape, geom :: number }
 				end
@@ -188,7 +230,7 @@ function Autowedge.region(
 	local deltas: { { number } } = {}
 	for _, d in decisions do
 		local wx, wy, wz, shape, geom = d[1], d[2], d[3], d[4], d[5]
-		local mat = matAt(store, wx, wy, wz) -- preserve material
+		local mat = matAt(read, wx, wy, wz) -- preserve material (wedge writes never change material)
 		local byte1 = packByte1(shape, Shape.storedOrientation(shape, geom))
 		store:setCell(wx, wy, wz, mat, byte1)
 		deltas[#deltas + 1] = { wx, wy, wz, packCell(mat, byte1) }
