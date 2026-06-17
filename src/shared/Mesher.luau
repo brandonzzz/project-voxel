@@ -279,7 +279,7 @@ local function fillAndBake(
 	assetGate: (() -> ())?,
 	cubeCenter: Vector3?,
 	cubeHalf: Vector3?
-): (Content?, number, number, Vector3?)
+): (Content?, number, number, Vector3?, boolean?)
 	local count = #tris
 	if count == 0 then
 		return nil, 0, 0, nil
@@ -457,10 +457,15 @@ local function fillAndBake(
 	end
 	local result, baked = AssetService:CreateDataModelContentAsync(Content.fromObject(em))
 	releaseEditable(em)
-	if result ~= Enum.CreateContentResult.Success then
+	if result == Enum.CreateContentResult.StorageLimitExceeded then
+		-- The server's 200 MB/server static-content budget is full. Don't crash: signal the caller
+		-- (5th return) so a server streamer can LRU-evict an old chunk's mesh and retry. Clients are
+		-- limited only by disk space and never hit this. See [[server-render-architecture-findings]].
+		return nil, 0, 0, nil, true
+	elseif result ~= Enum.CreateContentResult.Success then
 		error("CreateDataModelContentAsync failed: " .. tostring(result))
 	end
-	return baked, count, count * 3, center
+	return baked, count, count * 3, center, false
 end
 
 -- Range-based build (kept for tests): collect a range then fill + bake. --
@@ -523,7 +528,8 @@ local function applyOrCreate(container: Instance, name: string, baked: Content, 
 	end
 end
 
-export type RebuildStats = { tris: number, verts: number, split: boolean, parts: number, buildMs: number }
+export type RebuildStats =
+	{ tris: number, verts: number, split: boolean, parts: number, buildMs: number, storageLimited: boolean }
 
 -- Rebuild a chunk's render mesh(es) into `container` with a SINGLE cull pass. `assetGate`, if
 -- given, is called once before EACH main-thread-blocking AssetService op (the bake and each
@@ -546,11 +552,13 @@ function Mesher.rebuildChunk(
 	local split = total > TRI_SPLIT_THRESHOLD
 	local desired: { [string]: boolean } = {}
 	local parts = 0
+	local storageLimited = false -- set if any (sub)mesh bake hit the server static-content budget
 
 	if total > 0 and not split then
 		-- Fixed transform: centre the part on the full chunk cube and pin its bbox to it.
 		local cc = Vector3.new(CHUNK_STUDS / 2, CHUNK_STUDS / 2, CHUNK_STUDS / 2)
-		local baked, _, _, center = fillAndBake(collected, yielder, assetGate, cc, cc)
+		local baked, _, _, center, sl = fillAndBake(collected, yielder, assetGate, cc, cc)
+		storageLimited = storageLimited or sl == true
 		if baked then
 			if assetGate then -- gate CreateMeshPartAsync too, so it can't stack with a bake in one frame
 				assetGate()
@@ -575,7 +583,8 @@ function Mesher.rebuildChunk(
 		for oi = 0, 7 do
 			local ox, oy, oz = oi % 2, math.floor(oi / 2) % 2, math.floor(oi / 4) % 2
 			local cc = Vector3.new(ox * oct + q, oy * oct + q, oz * oct + q)
-			local baked, _, _, center = fillAndBake(buckets[oi], yielder, assetGate, cc, Vector3.new(q, q, q))
+			local baked, _, _, center, sl = fillAndBake(buckets[oi], yielder, assetGate, cc, Vector3.new(q, q, q))
+			storageLimited = storageLimited or sl == true
 			if baked then
 				local nm = baseName .. "_oct" .. oi
 				if assetGate then -- gate CreateMeshPartAsync too (one AssetService op per frame)
@@ -600,6 +609,7 @@ function Mesher.rebuildChunk(
 		split = split,
 		parts = parts,
 		buildMs = (os.clock() - t0) * 1000,
+		storageLimited = storageLimited,
 	}
 end
 
