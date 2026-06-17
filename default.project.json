@@ -4,20 +4,20 @@
     "$className": "DataModel",
 
     "ReplicatedStorage": {
-      "Shared": {
+      "LegacyVoxelTerrain": {
         "$path": "src/shared"
       }
     },
 
     "ServerScriptService": {
-      "Server": {
+      "LegacyVoxelTerrain": {
         "$path": "src/server"
       }
     },
 
     "StarterPlayer": {
       "StarterPlayerScripts": {
-        "Client": {
+        "LegacyVoxelTerrain": {
           "$path": "src/client"
         }
       }
