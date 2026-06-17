@@ -88,8 +88,11 @@ end
 
 -- Cull pass over a local cell range, invoking emit(p1,p2,p3, materialId, octant)
 -- for each surviving triangle. Positions are chunk-local studs (0..CHUNK_STUDS). --
+-- `sample(lx,ly,lz) -> rawValue` over local coords -1..16 (chunk + 1-cell borders). The caller
+-- supplies it -- store:makeNeighborSampler on the main thread, or a padded-buffer reader inside a
+-- worker Actor -- so the cull is decoupled from the store and can run in parallel.
 local function forEachTriangle(
-	store: VoxelStore.Store,
+	sample: (number, number, number) -> number,
 	cx: number,
 	cy: number,
 	cz: number,
@@ -102,7 +105,6 @@ local function forEachTriangle(
 	emit: (Vector3, Vector3, Vector3, number, number, number, number, number, number, boolean, boolean, number, number, number) -> (),
 	yielder: (() -> ())?
 )
-	local sample = store:makeNeighborSampler(cx, cy, cz)
 	local emitFace = table.create(6)
 	local emitted = 0
 	for lx = lxlo, lxhi do
@@ -195,7 +197,7 @@ local function countRange(
 	yielder: (() -> ())?
 ): number
 	local n = 0
-	forEachTriangle(store, cx, cy, cz, lxlo, lxhi, lylo, lyhi, lzlo, lzhi, function()
+	forEachTriangle(store:makeNeighborSampler(cx, cy, cz), cx, cy, cz, lxlo, lxhi, lylo, lyhi, lzlo, lzhi, function()
 		n += 1
 	end, yielder)
 	return n
@@ -238,7 +240,7 @@ local function collectRange(
 ): ({ Tri }, number)
 	local collected: { Tri } = {}
 	forEachTriangle(
-		store,
+		store:makeNeighborSampler(cx, cy, cz),
 		cx,
 		cy,
 		cz,
@@ -270,6 +272,113 @@ local function collectRange(
 	)
 	return collected, #collected
 end
+
+-- ===== Parallel-collect support (worker-Actor offload of the cull) ============================
+-- The cull/face-extraction is pure Lua, so it can run in a worker Actor. The main thread snapshots
+-- the chunk (buildPaddedChunk) into a string an Actor can read (SharedTable can't hold a buffer);
+-- the Actor rebuilds a sampler (makePaddedSampler), runs the cull emitting to a flat f32 buffer
+-- (collectToBuffer), and the main thread turns that back into a Tri list (deserializeTris) to feed
+-- the existing fillAndBake. 20 floats/triangle (see Tri).
+local TRI_FLOATS = 20
+local PAD = CHUNK + 2 -- 18: chunk 0..15 + a 1-cell border each side, indexed by +1
+
+-- 18^3 raw-value snapshot of the chunk + its 1-cell shell (local coords -1..16), as a binary string. --
+function Mesher.buildPaddedChunk(store: VoxelStore.Store, cx: number, cy: number, cz: number): string
+	local buf = buffer.create(PAD * PAD * PAD * 2)
+	local read = store:makeChunkReader(cx, cy, cz) -- fast path for the chunk's own 0..15 cells
+	local sampler = store:makeNeighborSampler(cx, cy, cz) -- the -1 / 16 border shell (neighbour chunks)
+	for ly = -1, CHUNK do
+		for lz = -1, CHUNK do
+			for lx = -1, CHUNK do
+				local raw
+				if lx >= 0 and lx < CHUNK and ly >= 0 and ly < CHUNK and lz >= 0 and lz < CHUNK then
+					raw = read(lx, ly, lz)
+				else
+					raw = sampler(lx, ly, lz)
+				end
+				buffer.writeu16(buf, ((lx + 1) + (lz + 1) * PAD + (ly + 1) * PAD * PAD) * 2, raw)
+			end
+		end
+	end
+	return buffer.tostring(buf)
+end
+
+-- Reconstruct a sample(lx,ly,lz)->raw over local coords -1..16 from a padded-chunk string. --
+function Mesher.makePaddedSampler(paddedStr: string): (number, number, number) -> number
+	local buf = buffer.fromstring(paddedStr)
+	return function(lx: number, ly: number, lz: number): number
+		return buffer.readu16(buf, ((lx + 1) + (lz + 1) * PAD + (ly + 1) * PAD * PAD) * 2)
+	end
+end
+
+-- Run the cull via `sample`, serializing every surviving triangle to a flat f32 buffer string.
+-- Returns (bufferString, triangleCount). Pure Lua -> safe inside a worker Actor. --
+function Mesher.collectToBuffer(
+	sample: (number, number, number) -> number,
+	cx: number,
+	cy: number,
+	cz: number,
+	yielder: (() -> ())?
+): (string, number)
+	local out: { number } = {}
+	local k = 0
+	forEachTriangle(
+		sample,
+		cx,
+		cy,
+		cz,
+		0,
+		CHUNK - 1,
+		0,
+		CHUNK - 1,
+		0,
+		CHUNK - 1,
+		function(p1, p2, p3, mat, oct, face, cwx, cwy, cwz, topExposed, slopeCrest, ccx, ccy, ccz)
+			out[k + 1], out[k + 2], out[k + 3] = p1.X, p1.Y, p1.Z
+			out[k + 4], out[k + 5], out[k + 6] = p2.X, p2.Y, p2.Z
+			out[k + 7], out[k + 8], out[k + 9] = p3.X, p3.Y, p3.Z
+			out[k + 10], out[k + 11], out[k + 12] = mat, oct, face
+			out[k + 13], out[k + 14], out[k + 15] = cwx, cwy, cwz
+			out[k + 16], out[k + 17], out[k + 18] = ccx, ccy, ccz
+			out[k + 19] = topExposed and 1 or 0
+			out[k + 20] = slopeCrest and 1 or 0
+			k += TRI_FLOATS
+		end,
+		yielder
+	)
+	local buf = buffer.create(k * 4)
+	for i = 0, k - 1 do
+		buffer.writef32(buf, i * 4, out[i + 1])
+	end
+	return buffer.tostring(buf), k // TRI_FLOATS
+end
+
+-- Turn a collectToBuffer string back into a Tri list (main thread, after the Actor returns). --
+function Mesher.deserializeTris(bufStr: string, count: number): { Tri }
+	local buf = buffer.fromstring(bufStr)
+	local tris: { Tri } = table.create(count)
+	for t = 0, count - 1 do
+		local o = t * TRI_FLOATS * 4
+		tris[t + 1] = {
+			p1 = Vector3.new(buffer.readf32(buf, o), buffer.readf32(buf, o + 4), buffer.readf32(buf, o + 8)),
+			p2 = Vector3.new(buffer.readf32(buf, o + 12), buffer.readf32(buf, o + 16), buffer.readf32(buf, o + 20)),
+			p3 = Vector3.new(buffer.readf32(buf, o + 24), buffer.readf32(buf, o + 28), buffer.readf32(buf, o + 32)),
+			mat = buffer.readf32(buf, o + 36),
+			oct = buffer.readf32(buf, o + 40),
+			face = buffer.readf32(buf, o + 44),
+			cwx = buffer.readf32(buf, o + 48),
+			cwy = buffer.readf32(buf, o + 52),
+			cwz = buffer.readf32(buf, o + 56),
+			ccx = buffer.readf32(buf, o + 60),
+			ccy = buffer.readf32(buf, o + 64),
+			ccz = buffer.readf32(buf, o + 68),
+			topExposed = buffer.readf32(buf, o + 72) ~= 0,
+			slopeCrest = buffer.readf32(buf, o + 76) ~= 0,
+		}
+	end
+	return tris
+end
+-- =============================================================================================
 
 -- Fill + bake one EditableMesh from a triangle list, centred on its own bbox.
 -- Returns (bakedContent, triCount, vertCount, centerLocal) or nil when empty. --
