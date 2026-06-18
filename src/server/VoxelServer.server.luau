@@ -265,12 +265,15 @@ end
 
 local clipAccum = 0
 local FALL_MARGIN = CELL * 0.5 -- only rubber-band once clearly below the solid surface
--- A genuine fall-through is sustained FREE-FALL; a character merely resting on or nestled
--- against terrain (tucked into an InverseCorner's notch, standing beside a taller solid,
--- swimming) is supported and barely moves vertically. The surface sample floors HRP.X/Z to a
--- single column, which near an inside corner can round onto the TALLER adjacent solid voxel --
--- reading the character as "below surface" though it is fine. Gating on free-fall velocity
--- (held for two consecutive samples) ignores those supported cases and only catches real drops.
+local CHAR_HALF = 2 -- character horizontal half-extent (studs); the surface check samples every cell
+-- column the body overlaps (a ~CELL-wide box), NOT just floor(HRP.X/Z): a single-column sample rounds
+-- onto an adjacent un-dug column at a hole's edge and ejects the character back out of the hole ("the
+-- hole acts as if it weren't there", worst past the collision-streamed ring where this is the only
+-- support). Two more guards against false ejection: (1) a genuine fall-through is sustained FREE-FALL,
+-- while a character resting on / nestled against terrain (an InverseCorner notch, beside a taller
+-- solid, swimming) is supported and barely moves vertically -- so gate on free-fall velocity held for
+-- two consecutive samples; (2) count as fallen-through only when below the LOWEST overlapped column
+-- surface, so the character can always descend into a hole under any part of its footprint.
 local FALL_SPEED = 30 -- studs/s of downward velocity that counts as free-fall (not swim/rest)
 local fellStreak: { [Player]: number } = {}
 RunService.Heartbeat:Connect(function(dt)
@@ -285,23 +288,45 @@ RunService.Heartbeat:Connect(function(dt)
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if hrp and hum and hum.Health > 0 then
 			local p = hrp.Position
-			local cellX = math.floor(p.X / CELL)
-			local cellZ = math.floor(p.Z / CELL)
-			local solidTop = columnSolidTop(cellX, cellZ)
-			if solidTop >= 0 then
-				local surfaceY = (solidTop + 1) * CELL
-				local fallingThrough = p.Y < surfaceY - FALL_MARGIN
+			-- Sample every cell column the character's footprint overlaps (up to 2x2), so a body
+			-- straddling a hole's edge is never ejected by an adjacent un-dug column (see CHAR_HALF).
+			local x0 = math.floor((p.X - CHAR_HALF) / CELL)
+			local x1 = math.floor((p.X + CHAR_HALF) / CELL)
+			local z0 = math.floor((p.Z - CHAR_HALF) / CELL)
+			local z1 = math.floor((p.Z + CHAR_HALF) / CELL)
+			local anySolid = false
+			local minSurfaceY = math.huge -- lowest surface over ALL overlapped columns (a hole's top -1 => 0)
+			local maxSolidSurfaceY = -math.huge -- lift target: the highest real solid surface
+			for cellX = x0, x1 do
+				for cellZ = z0, z1 do
+					local top = columnSolidTop(cellX, cellZ)
+					local surfaceY = (top + 1) * CELL
+					if surfaceY < minSurfaceY then
+						minSurfaceY = surfaceY
+					end
+					if top >= 0 then
+						anySolid = true
+						if surfaceY > maxSolidSurfaceY then
+							maxSolidSurfaceY = surfaceY
+						end
+					end
+				end
+			end
+			if anySolid then
+				-- fell THROUGH only if below the LOWEST overlapped surface (else it is descending
+				-- into a hole under some part of its footprint, which must stay allowed)
+				local fallingThrough = p.Y < minSurfaceY - FALL_MARGIN
 					and hrp.AssemblyLinearVelocity.Y < -FALL_SPEED
 				if fallingThrough then
 					fellStreak[player] = (fellStreak[player] or 0) + 1
-					if fellStreak[player] >= 2 then -- sustained free-fall below the surface
-						hrp.CFrame = CFrame.new(p.X, surfaceY + 3.5, p.Z) -- fell through; lift to surface
+					if fellStreak[player] >= 2 then -- sustained free-fall below every overlapped surface
+						hrp.CFrame = CFrame.new(p.X, maxSolidSurfaceY + 3.5, p.Z) -- fell through; lift to surface
 						hrp.AssemblyLinearVelocity = Vector3.zero
 						fellStreak[player] = 0
 					end
 				else
 					fellStreak[player] = 0
-					if p.Y >= surfaceY then
+					if p.Y >= maxSolidSurfaceY then
 						lastSafe[player] = p
 					end
 				end
