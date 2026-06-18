@@ -28,8 +28,8 @@ local CHUNK_STUDS = Constants.CHUNK_STUDS
 local ChunkManager = {}
 ChunkManager.__index = ChunkManager
 
-local function keyOf(cx: number, cz: number): string
-	return cx .. "_" .. cz
+local function keyOf(cx: number, cy: number, cz: number): string
+	return cx .. "_" .. cy .. "_" .. cz
 end
 
 export type Options = {
@@ -79,14 +79,14 @@ function ChunkManager.new(opts: Options)
 	self.onBuilt = opts.onBuilt
 	self.onUnloaded = opts.onUnloaded
 
-	self.loaded = {} :: { [string]: { cx: number, cz: number } }
+	self.loaded = {} :: { [string]: { cx: number, cy: number, cz: number } }
 	self.based = {} :: { [string]: boolean } -- base terrain generated
 	self.wedged = {} :: { [string]: boolean } -- autowedge pass applied
 	self.inQueue = {} :: { [string]: boolean }
-	self.queue = {} :: { { key: string, cx: number, cz: number, dist: number } }
+	self.queue = {} :: { { key: string, cx: number, cy: number, cz: number, dist: number } }
 	self.building = {} :: { [string]: boolean }
 	self.buildingCount = 0
-	self.dirty = {} :: { [string]: { cx: number, cz: number } } -- chunks needing a rebuild after edits
+	self.dirty = {} :: { [string]: { cx: number, cy: number, cz: number } } -- chunks needing a rebuild after edits
 	self.frameDeadline = 0
 	self.lastBuildMs = 0
 	self.maxFrameMs = 0
@@ -101,7 +101,7 @@ function ChunkManager.new(opts: Options)
 	self.nearOpsPerFrame = opts.nearOpsPerFrame or 2 -- urgent near chunks: up to N heavy ops/frame
 	self.farOpsPerFrame = opts.farOpsPerFrame or 0.34 -- far chunks: ~1 op every 3 frames (fps-safe)
 	self._opCredits = 1
-	self._activeChunk = nil :: { cx: number, cz: number }?
+	self._activeChunk = nil :: { cx: number, cy: number, cz: number }?
 
 	local mgr = self
 	self._yielder = function()
@@ -132,54 +132,56 @@ function ChunkManager:waitAssetSlot()
 	self._bakeGate()
 end
 
-function ChunkManager:focusChunk(): (number, number)
+function ChunkManager:focusChunk(): (number, number, number)
 	local p = self.focusFn()
-	return math.floor(p.X / CHUNK_STUDS), math.floor(p.Z / CHUNK_STUDS)
+	return math.floor(p.X / CHUNK_STUDS), math.floor(p.Y / CHUNK_STUDS), math.floor(p.Z / CHUNK_STUDS)
 end
 
-function ChunkManager:_enqueueMissing(fcx: number, fcz: number)
+function ChunkManager:_enqueueMissing(fcx: number, fcy: number, fcz: number)
 	local r = self.radius
-	for dx = -r, r do
-		for dz = -r, r do
-			if dx * dx + dz * dz <= r * r then
-				local cx, cz = fcx + dx, fcz + dz
-				local k = keyOf(cx, cz)
-				if not self.loaded[k] and not self.building[k] and not self.inQueue[k] then
-					self.inQueue[k] = true
-					self.queue[#self.queue + 1] = { key = k, cx = cx, cz = cz, dist = 0 }
+	for dy = -r, r do
+		for dx = -r, r do
+			for dz = -r, r do
+				if dx * dx + dy * dy + dz * dz <= r * r then
+					local cx, cy, cz = fcx + dx, fcy + dy, fcz + dz
+					local k = keyOf(cx, cy, cz)
+					if not self.loaded[k] and not self.building[k] and not self.inQueue[k] then
+						self.inQueue[k] = true
+						self.queue[#self.queue + 1] = { key = k, cx = cx, cy = cy, cz = cz, dist = 0 }
+					end
 				end
 			end
 		end
 	end
 end
 
-function ChunkManager:_removeChunkParts(cx: number, cz: number)
-	local base = string.format("C_%d_%d_%d", cx, self.cy, cz)
+function ChunkManager:_removeChunkParts(cx: number, cy: number, cz: number)
+	local base = string.format("C_%d_%d_%d", cx, cy, cz)
 	for _, ch in self.container:GetChildren() do
 		if ch.Name == base or string.match(ch.Name, "^" .. base .. "_oct%d$") then
 			ch:Destroy()
 		end
 	end
 	if self.onUnloaded then
-		self.onUnloaded(cx, cz)
+		self.onUnloaded(cx, cy, cz)
 	end
 end
 
-function ChunkManager:_unloadFar(fcx: number, fcz: number)
+function ChunkManager:_unloadFar(fcx: number, fcy: number, fcz: number)
 	local limit = self.radius + self.unloadMargin
 	for k, pos in self.loaded do
-		local dx, dz = pos.cx - fcx, pos.cz - fcz
-		if dx * dx + dz * dz > limit * limit then
-			self:_removeChunkParts(pos.cx, pos.cz)
+		local dx, dy, dz = pos.cx - fcx, pos.cy - fcy, pos.cz - fcz
+		if dx * dx + dy * dy + dz * dz > limit * limit then
+			self:_removeChunkParts(pos.cx, pos.cy, pos.cz)
 			self.loaded[k] = nil
 		end
 	end
 end
 
-function ChunkManager:_sortQueue(fcx: number, fcz: number)
+function ChunkManager:_sortQueue(fcx: number, fcy: number, fcz: number)
 	for _, it in self.queue do
-		local dx, dz = it.cx - fcx, it.cz - fcz
-		it.dist = dx * dx + dz * dz
+		local dx, dy, dz = it.cx - fcx, it.cy - fcy, it.cz - fcz
+		it.dist = dx * dx + dy * dy + dz * dz
 	end
 	table.sort(self.queue, function(a, b)
 		return a.dist > b.dist -- nearest last, popped first
@@ -188,8 +190,8 @@ end
 
 -- Mark a loaded chunk for rebuild after an edit (debounced: many edits to one
 -- chunk in a frame collapse to a single rebuild that reads the current store). --
-function ChunkManager:markDirty(cx: number, cz: number)
-	self.dirty[keyOf(cx, cz)] = { cx = cx, cz = cz }
+function ChunkManager:markDirty(cx: number, cy: number, cz: number)
+	self.dirty[keyOf(cx, cy, cz)] = { cx = cx, cy = cy, cz = cz }
 end
 
 -- Re-enqueue dirty chunks that aren't currently building (deferred otherwise). --
@@ -200,37 +202,39 @@ function ChunkManager:_processDirty()
 			self.dirty[k] = nil
 			if not self.inQueue[k] then
 				self.inQueue[k] = true
-				self.queue[#self.queue + 1] = { key = k, cx = pos.cx, cz = pos.cz, dist = 0 }
+				self.queue[#self.queue + 1] = { key = k, cx = pos.cx, cy = pos.cy, cz = pos.cz, dist = 0 }
 			end
 		end
 	end
 end
 
 -- Base terrain only (f(seed)). --
-function ChunkManager:ensureBase(cx: number, cz: number)
-	local k = keyOf(cx, cz)
+function ChunkManager:ensureBase(cx: number, cy: number, cz: number)
+	local k = keyOf(cx, cy, cz)
 	if not self.based[k] then
-		self.gen:fillChunk(self.store, cx, self.cy, cz)
+		self.gen:fillChunk(self.store, cx, cy, cz)
 		self.based[k] = true
 	end
 end
 
--- Base + Autowedge for ONE chunk. Its own 8-neighbour bases are ensured first so
--- border cells re-wedge correctly (never treat out-of-chunk as Empty). --
-function ChunkManager:_wedgeOne(cx: number, cz: number)
-	self:ensureBase(cx, cz)
-	local k = keyOf(cx, cz)
+-- Base + Autowedge for ONE chunk. Its own 3x3x3 neighbour bases are ensured first so border cells
+-- re-wedge correctly (never treat out-of-chunk as Empty) -- including the chunk ABOVE, since the
+-- "open above" surface test at the top layer reads into cy+1. --
+function ChunkManager:_wedgeOne(cx: number, cy: number, cz: number)
+	self:ensureBase(cx, cy, cz)
+	local k = keyOf(cx, cy, cz)
 	if self.wedged[k] then
 		return
 	end
 	if Autowedge.ENABLED then
-		-- all 8 neighbours: inside-corner reads diagonal cells at chunk corners
-		for dx = -1, 1 do
-			for dz = -1, 1 do
-				self:ensureBase(cx + dx, cz + dz)
+		-- all 26 neighbours: inside-corner reads diagonals; the "open above" read crosses into cy+1
+		for dy = -1, 1 do
+			for dx = -1, 1 do
+				for dz = -1, 1 do
+					self:ensureBase(cx + dx, cy + dy, cz + dz)
+				end
 			end
 		end
-		local cy = self.cy
 		EditService.autowedgeRegion(
 			self.store,
 			cx * CHUNK,
@@ -244,43 +248,39 @@ function ChunkManager:_wedgeOne(cx: number, cz: number)
 	self.wedged[k] = true
 end
 
--- Generation pipeline BEFORE the first bake / water render. The chunk AND all 8
--- neighbours are fully autowedged here so cross-chunk water-face detection
--- (WaterRender.faceAllWater reads neighbour cells) sees each neighbour's FINAL
--- slope/water state on the first build. Otherwise the chunk that bakes first reads
--- un-wedged neighbour base cells, mis-classifies the shared border as land, insets
--- that water face, and leaves a 0.02 seam at the chunk edge that never re-evaluates.
--- Net generation work is unchanged (each chunk is still based + wedged exactly once,
--- cached by flags) -- only the order is pulled earlier. Edit deltas also call this
--- before applying edits so lazy generation can't clobber edited cells. --
-function ChunkManager:ensureGenerated(cx: number, cz: number)
-	self:_wedgeOne(cx, cz)
-	for dx = -1, 1 do
-		for dz = -1, 1 do
-			if dx ~= 0 or dz ~= 0 then
-				self:_wedgeOne(cx + dx, cz + dz)
+-- Generation pipeline BEFORE the first bake / water render. The chunk AND all 26 neighbours are
+-- fully autowedged here so cross-chunk face detection (render border culling + WaterRender reading
+-- neighbour cells) sees each neighbour's FINAL slope/water state on the first build -- across all six
+-- faces, including the vertical neighbours now that streaming is 3D. Net generation work is unchanged
+-- (each chunk is still based + wedged exactly once, cached by flags) -- only the order is pulled
+-- earlier. Edit deltas also call this before applying edits so lazy generation can't clobber edits. --
+function ChunkManager:ensureGenerated(cx: number, cy: number, cz: number)
+	for dy = -1, 1 do
+		for dx = -1, 1 do
+			for dz = -1, 1 do
+				self:_wedgeOne(cx + dx, cy + dy, cz + dz)
 			end
 		end
 	end
 end
 
-function ChunkManager:_buildOne(cx: number, cz: number)
-	self:ensureGenerated(cx, cz)
+function ChunkManager:_buildOne(cx: number, cy: number, cz: number)
+	self:ensureGenerated(cx, cy, cz)
 	local stats
 	if self.collectPool then
 		-- Offload the cull to a worker Actor: snapshot the chunk (+1-cell shell) on the main thread,
 		-- collect in parallel (main yields, no Heartbeat block), then fill/bake/apply the returned
 		-- triangles on the main thread (AssetService isn't parallel-safe). buildPaddedChunk (~1-3 ms)
 		-- + deserialize (~0.25 ms) replace the ~21 ms main-thread cull.
-		local paddedStr = Mesher.buildPaddedChunk(self.store, cx, self.cy, cz)
-		local tris, count = self.collectPool:collect(cx, self.cy, cz, paddedStr)
-		stats = Mesher.rebuildFromTris(tris, count, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+		local paddedStr = Mesher.buildPaddedChunk(self.store, cx, cy, cz)
+		local tris, count = self.collectPool:collect(cx, cy, cz, paddedStr)
+		stats = Mesher.rebuildFromTris(tris, count, cx, cy, cz, self.container, self._yielder, self._bakeGate)
 	else
-		stats = Mesher.rebuildChunk(self.store, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+		stats = Mesher.rebuildChunk(self.store, cx, cy, cz, self.container, self._yielder, self._bakeGate)
 	end
 	self.lastBuildMs = stats.buildMs
 	if self.onBuilt then
-		self.onBuilt(cx, cz)
+		self.onBuilt(cx, cy, cz)
 	end
 end
 
@@ -294,16 +294,16 @@ function ChunkManager:_dispatch()
 		task.spawn(function()
 			-- the chunk now building, so update()'s credit refill paces by ITS distance to the player
 			-- (assumes maxConcurrent == 1, the default; with more, the last-dispatched chunk wins).
-			self._activeChunk = { cx = it.cx, cz = it.cz }
+			self._activeChunk = { cx = it.cx, cy = it.cy, cz = it.cz }
 			local ok, err = pcall(function()
-				self:_buildOne(it.cx, it.cz)
+				self:_buildOne(it.cx, it.cy, it.cz)
 			end)
 			if not ok then
 				warn("[ChunkManager] build error at " .. it.key .. ": " .. tostring(err))
 			end
 			self.building[it.key] = nil
 			self.buildingCount -= 1
-			self.loaded[it.key] = { cx = it.cx, cz = it.cz }
+			self.loaded[it.key] = { cx = it.cx, cy = it.cy, cz = it.cz }
 			self._activeChunk = nil
 		end)
 	end
@@ -390,7 +390,7 @@ function ChunkManager:update(dt: number)
 	self.frameDeadline = os.clock() + self.frameBudget
 	local ms = dt * 1000
 	self.maxFrameMs = math.max(ms, self.maxFrameMs * 0.95) -- decaying recent max
-	local fcx, fcz = self:focusChunk()
+	local fcx, fcy, fcz = self:focusChunk()
 
 	-- Refill the distance-adaptive heavy-op credit bucket (see _bakeGate). Rate depends on how close
 	-- the chunk currently being built is to the player NOW, so as the player moves the in-flight
@@ -398,17 +398,17 @@ function ChunkManager:update(dt: number)
 	-- bank up to a few ops for one frame; idle resets to 1 (next build's first op is prompt, no burst).
 	local ac = self._activeChunk
 	if ac then
-		local d = math.sqrt((ac.cx - fcx) ^ 2 + (ac.cz - fcz) ^ 2)
+		local d = math.sqrt((ac.cx - fcx) ^ 2 + (ac.cy - fcy) ^ 2 + (ac.cz - fcz) ^ 2)
 		local r = opsPerFrameFor(self, d)
 		self._opCredits = math.min(self._opCredits + r, math.max(1, math.ceil(r)))
 	else
 		self._opCredits = 1
 	end
 
-	self:_enqueueMissing(fcx, fcz)
+	self:_enqueueMissing(fcx, fcy, fcz)
 	self:_processDirty()
-	self:_unloadFar(fcx, fcz)
-	self:_sortQueue(fcx, fcz)
+	self:_unloadFar(fcx, fcy, fcz)
+	self:_sortQueue(fcx, fcy, fcz)
 	self:_dispatch()
 
 	local loadedCount = 0

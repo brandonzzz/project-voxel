@@ -72,9 +72,9 @@ local function run(): (number, number)
 			focusFn = function() return Vector3.zero end,
 			hud = false,
 		})
-		mgr:markDirty(5, 5)
-		mgr:markDirty(5, 5)
-		mgr:markDirty(6, 5)
+		mgr:markDirty(5, 0, 5)
+		mgr:markDirty(5, 0, 5)
+		mgr:markDirty(6, 0, 5)
 		check(keyset(mgr.dirty) == 2, "duplicate markDirty on same chunk collapses (debounce)")
 	end
 

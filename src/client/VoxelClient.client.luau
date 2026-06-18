@@ -94,16 +94,16 @@ manager = ChunkManager.new({
 	maxConcurrent = 1,
 	cy = 0,
 	collectPool = collectPool,
-	onBuilt = function(cx, cz)
+	onBuilt = function(cx, cy, cz)
 		-- Pace the collision+water rebuild onto its own gated frame so it doesn't pile onto the
 		-- frame that just ran the render bake/CreateMeshPartAsync (that stacking was the stutter).
 		manager:waitAssetSlot()
-		Collision.rebuildChunk(store, cx, 0, cz, collision)
-		WaterRender.rebuildChunk(store, cx, 0, cz, water)
+		Collision.rebuildChunk(store, cx, cy, cz, collision)
+		WaterRender.rebuildChunk(store, cx, cy, cz, water)
 	end,
-	onUnloaded = function(cx, cz)
-		Collision.removeChunk(cx, 0, cz, collision)
-		WaterRender.removeChunk(cx, 0, cz, water)
+	onUnloaded = function(cx, cy, cz)
+		Collision.removeChunk(cx, cy, cz, collision)
+		WaterRender.removeChunk(cx, cy, cz, water)
 	end,
 })
 
@@ -132,7 +132,7 @@ do
 			for _, d in result do
 				local wx, wy, wz, value = d[1], d[2], d[3], d[4]
 				if wx and wy and wz and value then
-					manager:ensureGenerated(VoxelStore.worldToChunk(wx), VoxelStore.worldToChunk(wz))
+					manager:ensureGenerated(VoxelStore.worldToChunk(wx), VoxelStore.worldToChunk(wy), VoxelStore.worldToChunk(wz))
 					store:setCell(wx, wy, wz, Constants.unpackCell(value))
 				end
 			end
@@ -184,22 +184,22 @@ local FACE_DIR = {
 
 -- Apply broadcast deltas to the local store and dirty-rebuild affected chunks.
 EditDeltas.OnClientEvent:Connect(function(deltas)
-	local affected: { [string]: { cx: number, cz: number } } = {}
+	local affected: { [string]: { cx: number, cy: number, cz: number } } = {}
 	for _, d in deltas do
 		local wx, wy, wz, value = d[1], d[2], d[3], d[4]
-		local cx = VoxelStore.worldToChunk(wx)
-		local cz = VoxelStore.worldToChunk(wz)
-		manager:ensureGenerated(cx, cz) -- base first, so the edit isn't clobbered
+		manager:ensureGenerated( -- base first, so the edit isn't clobbered
+			VoxelStore.worldToChunk(wx),
+			VoxelStore.worldToChunk(wy),
+			VoxelStore.worldToChunk(wz)
+		)
 		store:setCell(wx, wy, wz, Constants.unpackCell(value))
 		for _, c in EditService.affectedChunks(wx, wy, wz) do
-			if c.cy == 0 then
-				affected[c.cx .. "_" .. c.cz] = { cx = c.cx, cz = c.cz }
-			end
+			affected[c.cx .. "_" .. c.cy .. "_" .. c.cz] = { cx = c.cx, cy = c.cy, cz = c.cz }
 		end
 	end
 	for _, c in affected do
-		manager:ensureGenerated(c.cx, c.cz)
-		manager:markDirty(c.cx, c.cz)
+		manager:ensureGenerated(c.cx, c.cy, c.cz)
+		manager:markDirty(c.cx, c.cy, c.cz)
 	end
 end)
 
