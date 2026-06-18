@@ -90,6 +90,12 @@ function WorldGen.fillChunk(self: WorldGen, store, cx: number, cy: number, cz: n
 			end
 		end
 	end
+	-- Collapse uniform results (deep bedrock = all granite, etc.) back to a flag-only chunk so the
+	-- 3D streaming sphere doesn't carry an 8 KB buffer per off-surface chunk. No-op for genuinely
+	-- mixed chunks (the surface band) and for mock stores without the method.
+	if store.compactChunk then
+		store:compactChunk(cx, cy, cz)
+	end
 	return any
 end
 

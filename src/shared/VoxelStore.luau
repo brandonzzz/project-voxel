@@ -155,6 +155,28 @@ function VoxelStore.setChunk(self: Store, chunk: Chunk)
 	self.chunks[key] = chunk
 end
 
+-- If a Mixed chunk's buffer holds a single value throughout, collapse it back to a flag-only uniform
+-- chunk and free the 8 KB buffer. Transparent to every reader (uniform chunks return fillValue). This
+-- is what keeps the 3D streaming sphere cheap: deep bedrock (cy <= -2) fills as uniform granite, and
+-- sky as uniform Empty, so most off-surface chunks carry no buffer. Returns true if collapsed. --
+function VoxelStore.compactChunk(self: Store, cx: number, cy: number, cz: number): boolean
+	local chunk = self.chunks[chunkKey(cx, cy, cz)]
+	if not chunk or chunk.state ~= FillState.Mixed then
+		return false
+	end
+	local buf = chunk.buf :: buffer
+	local v0 = buffer.readu16(buf, 0)
+	for i = 1, CHUNK_CELLS - 1 do
+		if buffer.readu16(buf, i * 2) ~= v0 then
+			return false -- genuinely mixed; keep the buffer
+		end
+	end
+	chunk.fillValue = v0
+	chunk.state = (v0 == 0) and FillState.Empty or FillState.Solid
+	chunk.buf = nil
+	return true
+end
+
 -- World-space cell access ----------------------------------------------------
 
 function VoxelStore.getCell(self: Store, wx: number, wy: number, wz: number): (number, number)
