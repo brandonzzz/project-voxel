@@ -634,12 +634,13 @@ end
 
 export type RebuildStats = { tris: number, verts: number, split: boolean, parts: number, buildMs: number }
 
--- Rebuild a chunk's render mesh(es) into `container` with a SINGLE cull pass. `assetGate`, if
--- given, is called once before EACH main-thread-blocking AssetService op (the bake and each
--- CreateMeshPartAsync) so the streamer can cap how many run per frame -- spreading the unavoidable
--- ~16-24 ms-per-op cost one-per-frame instead of letting concurrent builds stack into one stutter. --
-function Mesher.rebuildChunk(
-	store: VoxelStore.Store,
+-- Build/swap a chunk's render parts from an ALREADY-COLLECTED triangle list -- the pipeline AFTER
+-- the cull. Shared by rebuildChunk (cull on the main thread) and the parallel-collect path (cull run
+-- in a worker Actor, triangles deserialized via Mesher.deserializeTris). `assetGate`, if given, is
+-- called once before EACH main-thread-blocking AssetService op (bake + each CreateMeshPartAsync). --
+function Mesher.rebuildFromTris(
+	collected: { Tri },
+	total: number,
 	cx: number,
 	cy: number,
 	cz: number,
@@ -650,8 +651,6 @@ function Mesher.rebuildChunk(
 	local t0 = os.clock()
 	local baseName = string.format("C_%d_%d_%d", cx, cy, cz)
 	local origin = Vector3.new(cx * CHUNK_STUDS, cy * CHUNK_STUDS, cz * CHUNK_STUDS)
-
-	local collected, total = collectRange(store, cx, cy, cz, 0, CHUNK - 1, 0, CHUNK - 1, 0, CHUNK - 1, yielder)
 	local split = total > TRI_SPLIT_THRESHOLD
 	local desired: { [string]: boolean } = {}
 	local parts = 0
@@ -710,6 +709,22 @@ function Mesher.rebuildChunk(
 		parts = parts,
 		buildMs = (os.clock() - t0) * 1000,
 	}
+end
+
+-- Rebuild a chunk's render mesh(es) into `container` with a SINGLE cull pass on the MAIN thread
+-- (collect then fill/bake/apply). The parallel-collect path instead runs the cull in a worker Actor
+-- and calls rebuildFromTris directly with the deserialized triangles. --
+function Mesher.rebuildChunk(
+	store: VoxelStore.Store,
+	cx: number,
+	cy: number,
+	cz: number,
+	container: Instance,
+	yielder: (() -> ())?,
+	assetGate: (() -> ())?
+): RebuildStats
+	local collected, total = collectRange(store, cx, cy, cz, 0, CHUNK - 1, 0, CHUNK - 1, 0, CHUNK - 1, yielder)
+	return Mesher.rebuildFromTris(collected, total, cx, cy, cz, container, yielder, assetGate)
 end
 
 Mesher.TRI_SPLIT_THRESHOLD = TRI_SPLIT_THRESHOLD
