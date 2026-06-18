@@ -48,8 +48,8 @@ export type Options = {
 	cy: number?,
 	hud: boolean?,
 	collectPool: any?, -- optional CollectPool: offloads the render cull to worker Actors
-	onBuilt: ((number, number) -> ())?,
-	onUnloaded: ((number, number) -> ())?,
+	onBuilt: ((number, number, number, number) -> ())?, -- (cx, cy, cz, renderTriCount)
+	onUnloaded: ((number, number, number) -> ())?,
 }
 
 -- Heavy-op refill rate (ops/frame) for a chunk `dchunks` chunks from the player. Near chunks load
@@ -280,7 +280,7 @@ function ChunkManager:_buildOne(cx: number, cy: number, cz: number)
 	end
 	self.lastBuildMs = stats.buildMs
 	if self.onBuilt then
-		self.onBuilt(cx, cy, cz)
+		self.onBuilt(cx, cy, cz, stats.tris)
 	end
 end
 
@@ -405,9 +405,20 @@ function ChunkManager:update(dt: number)
 		self._opCredits = 1
 	end
 
-	self:_enqueueMissing(fcx, fcy, fcz)
+	-- The enqueue + unload scans are O(radius^3) over the whole 3D sphere (and allocate a key string
+	-- per cell). New work only appears when the focus chunk moves or the radius changes, so skip both
+	-- scans on frames where neither did -- which is most frames once the player is standing still. This
+	-- keeps the per-frame cost of a large invisible sphere near zero (it was ~0.2 ms/frame at idle and
+	-- grows cubically). _processDirty / _sortQueue / _dispatch still run every frame (O(queue), empty at
+	-- idle) so edits and the in-flight build queue keep draining.
+	local lf = self._lastFocus
+	if not lf or lf.cx ~= fcx or lf.cy ~= fcy or lf.cz ~= fcz or self._lastRadius ~= self.radius then
+		self:_enqueueMissing(fcx, fcy, fcz)
+		self:_unloadFar(fcx, fcy, fcz)
+		self._lastFocus = { cx = fcx, cy = fcy, cz = fcz }
+		self._lastRadius = self.radius
+	end
 	self:_processDirty()
-	self:_unloadFar(fcx, fcy, fcz)
 	self:_sortQueue(fcx, fcy, fcz)
 	self:_dispatch()
 

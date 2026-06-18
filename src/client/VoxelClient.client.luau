@@ -94,11 +94,22 @@ manager = ChunkManager.new({
 	maxConcurrent = 1,
 	cy = 0,
 	collectPool = collectPool,
-	onBuilt = function(cx, cy, cz)
-		-- Pace the collision+water rebuild onto its own gated frame so it doesn't pile onto the
-		-- frame that just ran the render bake/CreateMeshPartAsync (that stacking was the stutter).
-		manager:waitAssetSlot()
-		Collision.rebuildChunk(store, cx, cy, cz, collision)
+	onBuilt = function(cx, cy, cz, tris)
+		if tris > 0 then
+			-- Visible chunk: pace the collision+water rebuild onto its own gated frame so it doesn't
+			-- pile onto the frame that just ran the render bake/CreateMeshPartAsync (that was the stutter).
+			manager:waitAssetSlot()
+			Collision.rebuildChunk(store, cx, cy, cz, collision)
+		else
+			-- No render triangles => no exposed faces => buried or empty => unreachable, so it needs no
+			-- collision (collision is solid-cube only). This skips the entire invisible interior of the
+			-- 3D sphere (deep bedrock, sky). No bake ran either, so there's nothing to pace against --
+			-- don't spend an asset-slot credit. removeChunk clears stale collision if an edit just
+			-- buried a formerly-exposed chunk. A later dig re-exposes faces -> tris > 0 -> collision back.
+			Collision.removeChunk(cx, cy, cz, collision)
+		end
+		-- Water is independent of solid render tris (a fully-submerged chunk has 0 solid tris but still
+		-- renders water), and is cheap for uniform chunks, so refresh it either way.
 		WaterRender.rebuildChunk(store, cx, cy, cz, water)
 	end,
 	onUnloaded = function(cx, cy, cz)
