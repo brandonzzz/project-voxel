@@ -31,8 +31,8 @@ local CHUNK_STUDS = CHUNK * CELL
 local ServerChunkStreamer = {}
 ServerChunkStreamer.__index = ServerChunkStreamer
 
-local function keyOf(cx: number, cz: number): string
-	return cx .. "_" .. cz
+local function keyOf(cx: number, cy: number, cz: number): string
+	return cx .. "_" .. cy .. "_" .. cz
 end
 
 export type Opts = {
@@ -61,15 +61,15 @@ function ServerChunkStreamer.new(opts: Opts)
 	self.onChunkLoaded = opts.onChunkLoaded
 	self.onChunkUnloaded = opts.onChunkUnloaded
 	self.expandFn = opts.expandFn
-	self.loaded = {} :: { [string]: { cx: number, cz: number } }
+	self.loaded = {} :: { [string]: { cx: number, cy: number, cz: number } }
 	-- extra keep-loaded reasons keyed by chunk: chunkReasons[key][reasonId] = true
 	self.chunkReasons = {} :: { [string]: { [string]: boolean } }
 	return self
 end
 
 -- Pin a chunk loaded for `reason` regardless of player proximity (SC4/SC5). --
-function ServerChunkStreamer:addReason(cx: number, cz: number, reason: string)
-	local key = keyOf(cx, cz)
+function ServerChunkStreamer:addReason(cx: number, cy: number, cz: number, reason: string)
+	local key = keyOf(cx, cy, cz)
 	local set = self.chunkReasons[key]
 	if not set then
 		set = {}
@@ -78,8 +78,8 @@ function ServerChunkStreamer:addReason(cx: number, cz: number, reason: string)
 	set[reason] = true
 end
 
-function ServerChunkStreamer:removeReason(cx: number, cz: number, reason: string)
-	local key = keyOf(cx, cz)
+function ServerChunkStreamer:removeReason(cx: number, cy: number, cz: number, reason: string)
+	local key = keyOf(cx, cy, cz)
 	local set = self.chunkReasons[key]
 	if set then
 		set[reason] = nil
@@ -89,8 +89,8 @@ function ServerChunkStreamer:removeReason(cx: number, cz: number, reason: string
 	end
 end
 
-function ServerChunkStreamer:isLoaded(cx: number, cz: number): boolean
-	return self.loaded[keyOf(cx, cz)] ~= nil
+function ServerChunkStreamer:isLoaded(cx: number, cy: number, cz: number): boolean
+	return self.loaded[keyOf(cx, cy, cz)] ~= nil
 end
 
 local function setGroup(folder: Instance, group: string?)
@@ -104,51 +104,51 @@ local function setGroup(folder: Instance, group: string?)
 	end
 end
 
-function ServerChunkStreamer:_load(cx: number, cz: number)
-	local key = keyOf(cx, cz)
+function ServerChunkStreamer:_load(cx: number, cy: number, cz: number)
+	local key = keyOf(cx, cy, cz)
 	if self.loaded[key] then
 		return
 	end
-	self.ensureWorld(cx, self.cy, cz)
-	Collision.rebuildChunk(self.store, cx, self.cy, cz, self.container)
-	local folder = self.container:FindFirstChild(string.format("Col_%d_%d_%d", cx, self.cy, cz))
+	self.ensureWorld(cx, cy, cz)
+	Collision.rebuildChunk(self.store, cx, cy, cz, self.container)
+	local folder = self.container:FindFirstChild(string.format("Col_%d_%d_%d", cx, cy, cz))
 	if folder then
 		setGroup(folder, self.collisionGroup)
 	end
-	self.loaded[key] = { cx = cx, cz = cz }
+	self.loaded[key] = { cx = cx, cy = cy, cz = cz }
 	if self.onChunkLoaded then
-		self.onChunkLoaded(cx, cz)
+		self.onChunkLoaded(cx, cy, cz)
 	end
 end
 
-function ServerChunkStreamer:_unload(cx: number, cz: number)
-	local key = keyOf(cx, cz)
+function ServerChunkStreamer:_unload(cx: number, cy: number, cz: number)
+	local key = keyOf(cx, cy, cz)
 	if not self.loaded[key] then
 		return
 	end
-	Collision.removeChunk(cx, self.cy, cz, self.container)
+	Collision.removeChunk(cx, cy, cz, self.container)
 	self.loaded[key] = nil
 	if self.onChunkUnloaded then
-		self.onChunkUnloaded(cx, cz)
+		self.onChunkUnloaded(cx, cy, cz)
 	end
 end
 
 -- Rebuild a loaded chunk's collision (after an edit/explosion changed its cells). No-op if
 -- the chunk isn't currently loaded. The store is assumed already mutated by the caller. --
-function ServerChunkStreamer:markDirty(cx: number, cz: number)
-	if not self.loaded[keyOf(cx, cz)] then
+function ServerChunkStreamer:markDirty(cx: number, cy: number, cz: number)
+	if not self.loaded[keyOf(cx, cy, cz)] then
 		return
 	end
-	Collision.rebuildChunk(self.store, cx, self.cy, cz, self.container)
-	local folder = self.container:FindFirstChild(string.format("Col_%d_%d_%d", cx, self.cy, cz))
+	Collision.rebuildChunk(self.store, cx, cy, cz, self.container)
+	local folder = self.container:FindFirstChild(string.format("Col_%d_%d_%d", cx, cy, cz))
 	if folder then
 		setGroup(folder, self.collisionGroup)
 	end
 end
 
--- Desired set = union of a chunk radius around every player + all pinned reasons. --
-function ServerChunkStreamer:_desired(): { [string]: { cx: number, cz: number } }
-	local want: { [string]: { cx: number, cz: number } } = {}
+-- Desired set = union of a 3D chunk sphere around every player + all pinned reasons. --
+function ServerChunkStreamer:_desired(): { [string]: { cx: number, cy: number, cz: number } }
+	local want: { [string]: { cx: number, cy: number, cz: number } } = {}
 	local r = self.radius
 	for _, plr in Players:GetPlayers() do
 		local char = plr.Character
@@ -156,26 +156,40 @@ function ServerChunkStreamer:_desired(): { [string]: { cx: number, cz: number } 
 		if hrp then
 			local p = hrp.Position
 			local fcx = math.floor(p.X / CHUNK_STUDS)
+			local fcy = math.floor(p.Y / CHUNK_STUDS)
 			local fcz = math.floor(p.Z / CHUNK_STUDS)
-			for dx = -r, r do
-				for dz = -r, r do
-					if dx * dx + dz * dz <= r * r then
-						local cx, cz = fcx + dx, fcz + dz
-						want[keyOf(cx, cz)] = { cx = cx, cz = cz }
+			for dy = -r, r do
+				for dx = -r, r do
+					for dz = -r, r do
+						if dx * dx + dy * dy + dz * dz <= r * r then
+							local cx, cy, cz = fcx + dx, fcy + dy, fcz + dz
+							want[keyOf(cx, cy, cz)] = { cx = cx, cy = cy, cz = cz }
+						end
 					end
 				end
 			end
 		end
 	end
-	-- let loose assemblies pull in the neighbour chunks they span into (while their home chunk
-	-- is already wanted), so they don't fall through a loaded/unloaded seam.
+	-- Loose assemblies rest on the cy=0 surface; let them pull in the neighbour chunks they span
+	-- into. expandFn works in 2D (cy=0), so give it a 2D view of the wanted cy=0 chunks and merge
+	-- whatever it adds back as cy=0 3D entries.
 	if self.expandFn then
-		self.expandFn(want)
+		local view: { [string]: { cx: number, cz: number } } = {}
+		for _, pos in want do
+			if pos.cy == 0 then
+				view[pos.cx .. "_" .. pos.cz] = { cx = pos.cx, cz = pos.cz }
+			end
+		end
+		self.expandFn(view)
+		for _, pos in view do
+			want[keyOf(pos.cx, 0, pos.cz)] = { cx = pos.cx, cy = 0, cz = pos.cz }
+		end
 	end
 	for key, reasons in self.chunkReasons do
 		if next(reasons) then
-			local sx, sz = string.match(key, "(-?%d+)_(-?%d+)")
-			want[key] = { cx = tonumber(sx) :: number, cz = tonumber(sz) :: number }
+			local sx, sy, sz = string.match(key, "(-?%d+)_(-?%d+)_(-?%d+)")
+			want[key] =
+				{ cx = tonumber(sx) :: number, cy = tonumber(sy) :: number, cz = tonumber(sz) :: number }
 		end
 	end
 	return want
@@ -192,13 +206,13 @@ function ServerChunkStreamer:_update()
 	local want = self:_desired()
 	for key, pos in want do
 		if not self.loaded[key] then
-			self:_load(pos.cx, pos.cz)
+			self:_load(pos.cx, pos.cy, pos.cz)
 			task.wait() -- spread bursts across frames so big loads don't spike the server
 		end
 	end
 	for key, pos in self.loaded do
 		if not want[key] then
-			self:_unload(pos.cx, pos.cz)
+			self:_unload(pos.cx, pos.cy, pos.cz)
 		end
 	end
 end

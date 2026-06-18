@@ -141,9 +141,7 @@ RequestEdit.OnServerEvent:Connect(function(player, wx, wy, wz, material, byte1)
 	EditDeltas:FireAllClients({ delta })
 	if streamer then
 		for _, c in EditService.affectedChunks(delta[1], delta[2], delta[3]) do
-			if c.cy == 0 then
-				streamer:markDirty(c.cx, c.cz)
-			end
+			streamer:markDirty(c.cx, c.cy, c.cz)
 		end
 	end
 end)
@@ -188,8 +186,10 @@ local function detonate(wx: number, wy: number, wz: number, radius: number)
 	EditDeltas:FireAllClients(deltas)
 	if streamer then
 		for ccx = c0x, c1x do
-			for ccz = c0z, c1z do
-				streamer:markDirty(ccx, ccz)
+			for ccy = c0y, c1y do
+				for ccz = c0z, c1z do
+					streamer:markDirty(ccx, ccy, ccz)
+				end
 			end
 		end
 	end
@@ -465,9 +465,18 @@ streamer = ServerChunkStreamer.new({
 	collisionGroup = SERVER_TERRAIN_GROUP,
 	cy = 0,
 	radius = 4,
-	onChunkLoaded = LoosePartManager.restoreChunk,
-	onChunkUnloaded = LoosePartManager.stowChunk,
-	expandFn = LoosePartManager.expandLoaded, -- SC4: pull in chunks loose assemblies span into
+	-- Loose parts rest on the cy=0 surface, so only swap them for the cy=0 band of the 3D stream.
+	onChunkLoaded = function(cx: number, cy: number, cz: number)
+		if cy == 0 then
+			LoosePartManager.restoreChunk(cx, cz)
+		end
+	end,
+	onChunkUnloaded = function(cx: number, cy: number, cz: number)
+		if cy == 0 then
+			LoosePartManager.stowChunk(cx, cz)
+		end
+	end,
+	expandFn = LoosePartManager.expandLoaded, -- SC4: pull in cy=0 chunks loose assemblies span into
 })
 streamer:start()
 
@@ -477,7 +486,7 @@ task.spawn(function()
 	while true do
 		task.wait(0.5)
 		LoosePartManager.stowOrphans(function(cx: number, cz: number): boolean
-			return streamer:isLoaded(cx, cz)
+			return streamer:isLoaded(cx, 0, cz) -- loose-part home chunks are on the cy=0 surface
 		end)
 		LoosePartManager.updateOwnershipGroups()
 	end
