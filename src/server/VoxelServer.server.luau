@@ -233,52 +233,39 @@ workspace.DescendantAdded:Connect(function(inst)
 	end
 end)
 
--- Anti fall-through: data-driven no-clip rubber-band -------------------------
--- The voxel data is authoritative even where collision parts haven't streamed in
--- yet. Only FULL SOLID cubes define the surface (water + slopes/wedges are ignored
--- entirely). If a character drops more than FALL_MARGIN below its column's solid
--- surface (fell through an unloaded chunk) or below the world, snap it back onto the
--- surface. Surface-based + margin, so walking on ramps / standing in carved holes /
--- swimming never false-triggers.
+-- Data-driven no-clip ---------------------------------------------------------
+-- The voxel data is authoritative even where collision parts have not streamed in yet, so a
+-- character can pass straight through solid terrain. This catches that purely from voxel OCCUPANCY:
+-- if the character's centre cell is a FULL solid cube -- a cell it could only be inside by clipping --
+-- lift it out onto the top of that solid stack. It makes NO world-space surface assumption (no "below
+-- y = surface", no void plane), so every empty-cell state -- standing on terrain, resting in a carved
+-- hole, swimming, or falling down a hole dug clean through to the void -- is left untouched. Only
+-- moving THROUGH solid voxels triggers it, in ANY direction, at ANY chunk height (cy-agnostic, so it
+-- already works once vertical chunks stream in). Water + slopes/wedges are not "solid" (a swimmer or a
+-- body resting against a ramp must never read as embedded).
 local RunService = game:GetService("RunService")
-local CHUNK = Constants.CHUNK
 local WATER = Constants.Material.Water
 local SOLID_SHAPE = Constants.Shape.Solid
-local VOID_Y = -20 -- studs; below this counts as fallen out of the world
 
-local lastSafe: { [Player]: Vector3 } = {}
-
--- highest FULL SOLID cube in a column (cy=0 band), or -1. Water and slope/wedge
--- cells are ignored entirely -- only solid cubes define the no-clip surface.
-local function columnSolidTop(cellX: number, cellZ: number): number
-	local cx = VoxelStore.worldToChunk(cellX)
-	local cz = VoxelStore.worldToChunk(cellZ)
-	ensureWorld(cx, 0, cz) -- wedged store: slope cells are wedges, so the surface is the solid base
-	for ly = CHUNK - 1, 0, -1 do
-		local m, b = store:getCell(cellX, ly, cellZ)
-		if m ~= 0 and m ~= WATER and (Constants.unpackByte1(b)) == SOLID_SHAPE then
-			return ly
-		end
-	end
-	return -1
+-- Is world cell (wx,wy,wz) a FULL solid cube in the CURRENT world data? Reads the live server store
+-- (the streamer + edit handlers keep the player's region final: base + autowedge + saved edits). It
+-- does NOT generate: an ungenerated cell -- the void below the world, the sky above, terrain not yet
+-- streamed -- reads Empty, so it is never "solid". That is exactly what lets a player fall through a
+-- hole dug clean to the void instead of being yanked back, with no world-space surface/void-plane
+-- assumption anywhere (cy-agnostic; once vertical chunks stream in their solid cells just read solid).
+local function cellIsSolid(wx: number, wy: number, wz: number): boolean
+	local m, b = store:getCell(wx, wy, wz)
+	return m ~= 0 and m ~= WATER and Constants.unpackByte1(b) == SOLID_SHAPE
 end
 
+local MAX_PUSH = 64 -- cells: safety bound on the "scan up to the solid's top" resolve
 local clipAccum = 0
-local FALL_MARGIN = CELL * 0.5 -- only rubber-band once clearly below the solid surface
-local CHAR_HALF = 2 -- character horizontal half-extent (studs); the surface check samples every cell
--- column the body overlaps (a ~CELL-wide box), NOT just floor(HRP.X/Z): a single-column sample rounds
--- onto an adjacent un-dug column at a hole's edge and ejects the character back out of the hole ("the
--- hole acts as if it weren't there", worst past the collision-streamed ring where this is the only
--- support). Two more guards against false ejection: (1) a genuine fall-through is sustained FREE-FALL,
--- while a character resting on / nestled against terrain (an InverseCorner notch, beside a taller
--- solid, swimming) is supported and barely moves vertically -- so gate on free-fall velocity held for
--- two consecutive samples; (2) count as fallen-through only when below the LOWEST overlapped column
--- surface, so the character can always descend into a hole under any part of its footprint.
-local FALL_SPEED = 30 -- studs/s of downward velocity that counts as free-fall (not swim/rest)
-local fellStreak: { [Player]: number } = {}
+-- 2 consecutive embedded reads before acting, so a 1-frame physics overshoot into a cube does not
+-- yank a character that the engine would have resolved on its own.
+local clipStreak: { [Player]: number } = {}
 RunService.Heartbeat:Connect(function(dt)
 	clipAccum += dt
-	if clipAccum < 0.1 then -- ~10 Hz is plenty for a rubber-band
+	if clipAccum < 0.1 then -- ~10 Hz
 		return
 	end
 	clipAccum = 0
@@ -288,59 +275,31 @@ RunService.Heartbeat:Connect(function(dt)
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if hrp and hum and hum.Health > 0 then
 			local p = hrp.Position
-			-- Sample every cell column the character's footprint overlaps (up to 2x2), so a body
-			-- straddling a hole's edge is never ejected by an adjacent un-dug column (see CHAR_HALF).
-			local x0 = math.floor((p.X - CHAR_HALF) / CELL)
-			local x1 = math.floor((p.X + CHAR_HALF) / CELL)
-			local z0 = math.floor((p.Z - CHAR_HALF) / CELL)
-			local z1 = math.floor((p.Z + CHAR_HALF) / CELL)
-			local anySolid = false
-			local minSurfaceY = math.huge -- lowest surface over ALL overlapped columns (a hole's top -1 => 0)
-			local maxSolidSurfaceY = -math.huge -- lift target: the highest real solid surface
-			for cellX = x0, x1 do
-				for cellZ = z0, z1 do
-					local top = columnSolidTop(cellX, cellZ)
-					local surfaceY = (top + 1) * CELL
-					if surfaceY < minSurfaceY then
-						minSurfaceY = surfaceY
+			local cellX = math.floor(p.X / CELL)
+			local cellY = math.floor(p.Y / CELL)
+			local cellZ = math.floor(p.Z / CELL)
+			if cellIsSolid(cellX, cellY, cellZ) then -- centre inside a solid cube => clipped through terrain
+				clipStreak[player] = (clipStreak[player] or 0) + 1
+				if clipStreak[player] >= 2 then
+					-- resolve upward: stand the character on top of the solid stack it is inside
+					local topY, n = cellY, 0
+					while n < MAX_PUSH and cellIsSolid(cellX, topY + 1, cellZ) do
+						topY += 1
+						n += 1
 					end
-					if top >= 0 then
-						anySolid = true
-						if surfaceY > maxSolidSurfaceY then
-							maxSolidSurfaceY = surfaceY
-						end
-					end
+					hrp.CFrame = CFrame.new(p.X, (topY + 1) * CELL + 3.5, p.Z)
+					hrp.AssemblyLinearVelocity = Vector3.zero
+					clipStreak[player] = 0
 				end
-			end
-			if anySolid then
-				-- fell THROUGH only if below the LOWEST overlapped surface (else it is descending
-				-- into a hole under some part of its footprint, which must stay allowed)
-				local fallingThrough = p.Y < minSurfaceY - FALL_MARGIN
-					and hrp.AssemblyLinearVelocity.Y < -FALL_SPEED
-				if fallingThrough then
-					fellStreak[player] = (fellStreak[player] or 0) + 1
-					if fellStreak[player] >= 2 then -- sustained free-fall below every overlapped surface
-						hrp.CFrame = CFrame.new(p.X, maxSolidSurfaceY + 3.5, p.Z) -- fell through; lift to surface
-						hrp.AssemblyLinearVelocity = Vector3.zero
-						fellStreak[player] = 0
-					end
-				else
-					fellStreak[player] = 0
-					if p.Y >= maxSolidSurfaceY then
-						lastSafe[player] = p
-					end
-				end
-			elseif p.Y < VOID_Y and lastSafe[player] then
-				hrp.CFrame = CFrame.new(lastSafe[player])
-				hrp.AssemblyLinearVelocity = Vector3.zero
+			else
+				clipStreak[player] = 0 -- in air / water / a hole / the void => never touched
 			end
 		end
 	end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	lastSafe[player] = nil
-	fellStreak[player] = nil
+	clipStreak[player] = nil
 end)
 
 -- Persistence: region-sharded edit overlay in a DataStore --------------------
