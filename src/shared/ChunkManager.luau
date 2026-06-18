@@ -47,6 +47,7 @@ export type Options = {
 	farOpsPerFrame: number?, -- heavy ops/frame at/beyond farDist (< 1 = idle frames, fps-safe)
 	cy: number?,
 	hud: boolean?,
+	collectPool: any?, -- optional CollectPool: offloads the render cull to worker Actors
 	onBuilt: ((number, number) -> ())?,
 	onUnloaded: ((number, number) -> ())?,
 }
@@ -74,6 +75,7 @@ function ChunkManager.new(opts: Options)
 	self.frameBudget = (opts.frameBudgetMs or 5) / 1000
 	self.cy = opts.cy or 0
 	self.wantHud = opts.hud ~= false
+	self.collectPool = opts.collectPool
 	self.onBuilt = opts.onBuilt
 	self.onUnloaded = opts.onUnloaded
 
@@ -264,7 +266,18 @@ end
 
 function ChunkManager:_buildOne(cx: number, cz: number)
 	self:ensureGenerated(cx, cz)
-	local stats = Mesher.rebuildChunk(self.store, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+	local stats
+	if self.collectPool then
+		-- Offload the cull to a worker Actor: snapshot the chunk (+1-cell shell) on the main thread,
+		-- collect in parallel (main yields, no Heartbeat block), then fill/bake/apply the returned
+		-- triangles on the main thread (AssetService isn't parallel-safe). buildPaddedChunk (~1-3 ms)
+		-- + deserialize (~0.25 ms) replace the ~21 ms main-thread cull.
+		local paddedStr = Mesher.buildPaddedChunk(self.store, cx, self.cy, cz)
+		local tris, count = self.collectPool:collect(cx, self.cy, cz, paddedStr)
+		stats = Mesher.rebuildFromTris(tris, count, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+	else
+		stats = Mesher.rebuildChunk(self.store, cx, self.cy, cz, self.container, self._yielder, self._bakeGate)
+	end
 	self.lastBuildMs = stats.buildMs
 	if self.onBuilt then
 		self.onBuilt(cx, cz)

@@ -31,6 +31,13 @@ Constants.CHUNK_STUDS = 16 * 4 -- 64 studs per chunk edge
 Constants.PAD = 18
 Constants.PAD_CELLS = 18 * 18 * 18
 
+-- Parallel-collect: run the render cull (Mesher.collectToBuffer, ~21 ms/chunk) in a pool of worker
+-- Actors instead of on the main thread (see CollectPool). The bake + CreateMeshPartAsync remain
+-- main-thread (AssetService is not parallel-safe); this only moves the pure-Lua face extraction off
+-- Heartbeat. Falls back to the all-main-thread Mesher.rebuildChunk path when false.
+Constants.PARALLEL_COLLECT = true
+Constants.COLLECT_WORKERS = 4 -- worker Actors in the pool (>= ChunkManager maxConcurrent)
+
 -- Shared world seed so server and client compute the same f(seed) base terrain;
 -- only the sparse edit overlay is replicated.
 Constants.WORLD_SEED = 2026

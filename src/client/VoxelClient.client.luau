@@ -20,6 +20,7 @@ local EditService = require(Lib:WaitForChild("EditService"))
 local Constants = require(Lib:WaitForChild("Constants"))
 local WaterRender = require(Lib:WaitForChild("WaterRender"))
 local WaterPhysics = require(Lib:WaitForChild("WaterPhysics"))
+local CollectPool = require(Lib:WaitForChild("CollectPool"))
 
 local player = Players.LocalPlayer
 
@@ -57,6 +58,14 @@ local store = VoxelStore.new()
 local gen = WorldGen.new(Constants.WORLD_SEED)
 
 local camera = Workspace.CurrentCamera
+
+-- Parallel-collect worker pool: offloads the render cull (~21 ms/chunk) off the main thread. Created
+-- before the manager so it can be handed in. Yields ~20 ms once while the worker Actors bind.
+local collectPool = nil
+if Constants.PARALLEL_COLLECT then
+	collectPool = CollectPool.new(Constants.COLLECT_WORKERS, player:WaitForChild("PlayerScripts"))
+end
+
 local manager -- forward-declared so onBuilt can pace its collision+water rebuild via the manager
 manager = ChunkManager.new({
 	store = store,
@@ -84,6 +93,7 @@ manager = ChunkManager.new({
 	frameBudgetMs = 3,
 	maxConcurrent = 1,
 	cy = 0,
+	collectPool = collectPool,
 	onBuilt = function(cx, cz)
 		-- Pace the collision+water rebuild onto its own gated frame so it doesn't pile onto the
 		-- frame that just ran the render bake/CreateMeshPartAsync (that stacking was the stutter).
