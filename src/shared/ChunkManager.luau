@@ -208,20 +208,26 @@ function ChunkManager:_processDirty()
 	end
 end
 
--- Base terrain only (f(seed)). --
-function ChunkManager:ensureBase(cx: number, cy: number, cz: number)
+-- Base terrain only (f(seed)). `yielder`, if given, is called after a FRESH gen so a burst of them
+-- (the 5x5x5 neighbourhood ensured on first entering a region) spreads across frames via the build's
+-- time budget instead of freezing one frame. Cached chunks never yield. --
+function ChunkManager:ensureBase(cx: number, cy: number, cz: number, yielder: (() -> ())?)
 	local k = keyOf(cx, cy, cz)
 	if not self.based[k] then
 		self.gen:fillChunk(self.store, cx, cy, cz)
 		self.based[k] = true
+		if yielder then
+			yielder()
+		end
 	end
 end
 
 -- Base + Autowedge for ONE chunk. Its own 3x3x3 neighbour bases are ensured first so border cells
 -- re-wedge correctly (never treat out-of-chunk as Empty) -- including the chunk ABOVE, since the
--- "open above" surface test at the top layer reads into cy+1. --
-function ChunkManager:_wedgeOne(cx: number, cy: number, cz: number)
-	self:ensureBase(cx, cy, cz)
+-- "open above" surface test at the top layer reads into cy+1. `yielder` time-slices the gen + the
+-- autowedge pass (both scale with chunk volume and were the biggest UNsliced per-chunk spike). --
+function ChunkManager:_wedgeOne(cx: number, cy: number, cz: number, yielder: (() -> ())?)
+	self:ensureBase(cx, cy, cz, yielder)
 	local k = keyOf(cx, cy, cz)
 	if self.wedged[k] then
 		return
@@ -231,7 +237,7 @@ function ChunkManager:_wedgeOne(cx: number, cy: number, cz: number)
 		for dy = -1, 1 do
 			for dx = -1, 1 do
 				for dz = -1, 1 do
-					self:ensureBase(cx + dx, cy + dy, cz + dz)
+					self:ensureBase(cx + dx, cy + dy, cz + dz, yielder)
 				end
 			end
 		end
@@ -244,6 +250,9 @@ function ChunkManager:_wedgeOne(cx: number, cy: number, cz: number)
 			cy * CHUNK + CHUNK - 1,
 			cz * CHUNK + CHUNK - 1
 		)
+		if yielder then
+			yielder() -- spread the autowedge pass off the bake frame
+		end
 	end
 	self.wedged[k] = true
 end
@@ -254,18 +263,18 @@ end
 -- faces, including the vertical neighbours now that streaming is 3D. Net generation work is unchanged
 -- (each chunk is still based + wedged exactly once, cached by flags) -- only the order is pulled
 -- earlier. Edit deltas also call this before applying edits so lazy generation can't clobber edits. --
-function ChunkManager:ensureGenerated(cx: number, cy: number, cz: number)
+function ChunkManager:ensureGenerated(cx: number, cy: number, cz: number, yielder: (() -> ())?)
 	for dy = -1, 1 do
 		for dx = -1, 1 do
 			for dz = -1, 1 do
-				self:_wedgeOne(cx + dx, cy + dy, cz + dz)
+				self:_wedgeOne(cx + dx, cy + dy, cz + dz, yielder)
 			end
 		end
 	end
 end
 
 function ChunkManager:_buildOne(cx: number, cy: number, cz: number)
-	self:ensureGenerated(cx, cy, cz)
+	self:ensureGenerated(cx, cy, cz, self._yielder) -- time-slice gen + autowedge across frames
 	local stats
 	if self.collectPool then
 		-- Offload the cull to a worker Actor: snapshot the chunk (+1-cell shell) on the main thread,
