@@ -303,11 +303,15 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- Persistence: region-sharded edit overlay in a DataStore --------------------
+-- Only PRIVATE servers persist: the data store is SCOPED to the private server's id so each private
+-- server keeps its own isolated world. PUBLIC servers get no data store (editDS stays nil, so save()
+-- and load() are no-ops). A reserved/VIP private server has a non-empty game.PrivateServerId; a
+-- public server leaves it "".
 local editDS: any = nil
 local dsReady = false
-do
+if game.PrivateServerId ~= "" then
 	local ok, ds = pcall(function()
-		return DataStoreService:GetDataStore("VoxelEdits_v1")
+		return DataStoreService:GetDataStore("VoxelEdits_v1", game.PrivateServerId) -- scope = this private server
 	end)
 	editDS = ok and ds or nil
 end

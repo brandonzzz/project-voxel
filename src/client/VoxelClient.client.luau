@@ -226,8 +226,11 @@ local function pickCell(): Collision.Hit?
 end
 
 -- Left click = remove, Q = place, E = explode (all under the cursor).
+-- DISABLED: mouse/keyboard terrain editing is turned off. The remotes + pick logic are kept for
+-- future tooling (e.g. part-representation placement); flip this flag to re-enable the build tools.
+local TERRAIN_EDIT_TOOLS_ENABLED = false
 UserInputService.InputBegan:Connect(function(input, processed)
-	if processed then
+	if processed or not TERRAIN_EDIT_TOOLS_ENABLED then
 		return
 	end
 	if input.UserInputType == Enum.UserInputType.MouseButton1 then
