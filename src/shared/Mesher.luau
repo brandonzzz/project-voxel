@@ -26,6 +26,7 @@ local Shape = require(script.Parent.Shape)
 local VoxelStore = require(script.Parent.VoxelStore)
 local MaterialPalette = require(script.Parent.MaterialPalette)
 local TextureAtlas = require(script.Parent.TextureAtlas)
+local WaterRender = require(script.Parent.WaterRender) -- for the water-sample look (texture/tile/colour); no cycle
 
 local CELL = Constants.CELL
 local HALF_CELL = Constants.CELL / 2
@@ -387,7 +388,8 @@ local function fillAndBake(
 	yielder: (() -> ())?,
 	assetGate: (() -> ())?,
 	cubeCenter: Vector3?,
-	cubeHalf: Vector3?
+	cubeHalf: Vector3?,
+	texturedOverride: boolean? -- nil = follow TextureAtlas.ENABLED; false = force vertex-colour (e.g. water, off-atlas)
 ): (Content?, number, number, Vector3?)
 	local count = #tris
 	if count == 0 then
@@ -420,7 +422,7 @@ local function fillAndBake(
 	-- Unique verts per triangle => default normals are flat (crisp). Textured mode
 	-- assigns atlas UVs per face type; otherwise per-material vertex colours.
 	local em = acquireEditable()
-	local textured = TextureAtlas.ENABLED
+	local textured = if texturedOverride ~= nil then texturedOverride else TextureAtlas.ENABLED
 	local colorIds: { [number]: number } = {}
 	local uvIds: { [string]: number } = {} -- share UV ids for repeated sub-tile corners
 	local function getUV(u: number, v: number): number
@@ -676,8 +678,17 @@ local baking = false
 -- left at its default of true) -- for part representations of voxels (debris, picked-up blocks,
 -- previews). The mesh is centred on the cell, so the caller positions the part by the voxel centre and
 -- rotates the part's CFrame for non-zero orientations. No cube-pinning, so the collision geometry
--- matches the actual shape (not a full cube). --
+-- matches the actual shape (not a full cube).
+--
+-- WATER is special: it has no atlas tile and isn't real swim-water here, so a water sample is ALWAYS a
+-- solid cube (the passed `shape` is ignored) and is dressed like the in-world water -- SmoothPlastic +
+-- Steel-blue base + the water surface texture on every face -- but STATIC (no scroll). It is a solid,
+-- collidable part standing in for water. --
 function Mesher.sampleVoxel(shape: number, material: number): MeshPart
+	local isWater = material == WATER
+	if isWater then
+		shape = Constants.Shape.Solid -- water sample is always a block, regardless of the CellBlock passed in
+	end
 	local key = shape * 256 + material
 	local baked = sampleCache[key]
 	if not baked then
@@ -687,9 +698,12 @@ function Mesher.sampleVoxel(shape: number, material: number): MeshPart
 		baked = sampleCache[key] -- a waiter ahead of us may have just baked this same combo
 		if not baked then
 			-- EditableMesh -> static content -> destroy the EditableMesh, all inside fillAndBake, so
-			-- nothing lingers on the Editable* budget once the static content is cached.
+			-- nothing lingers on the Editable* budget once the static content is cached. Water bakes
+			-- textured-mode (clean white verts, atlas UVs unused) so its look is driven entirely by the
+			-- base colour + face textures applied below.
 			baking = true
-			local ok, result = pcall(fillAndBake, oneCellTris(shape, material), nil, nil, Vector3.zero, nil)
+			local textured: boolean? = if isWater then true else nil
+			local ok, result = pcall(fillAndBake, oneCellTris(shape, material), nil, nil, Vector3.zero, nil, textured)
 			baking = false -- always clear, even on failure, so the gate can't deadlock
 			if not ok then
 				error("Mesher.sampleVoxel: bake failed -- " .. tostring(result))
@@ -704,7 +718,22 @@ function Mesher.sampleVoxel(shape: number, material: number): MeshPart
 	local part = AssetService:CreateMeshPartAsync(baked, { CollisionFidelity = Enum.CollisionFidelity.Default })
 	part.Name = string.format("Voxel_%d_%d", shape, material)
 	part.Anchored = true
-	part.TextureID = TextureAtlas.ENABLED and TextureAtlas.ASSET_ID or ""
+	if isWater then
+		part.TextureID = "" -- water isn't on the atlas
+		part.Material = Enum.Material.SmoothPlastic
+		part.BrickColor = BrickColor.new(WaterRender.BRICKCOLOR) -- Steel-blue base under the texture
+		for _, face in Enum.NormalId:GetEnumItems() do
+			local tex = Instance.new("Texture")
+			tex.Face = face
+			tex.StudsPerTileU = WaterRender.TILE
+			tex.StudsPerTileV = WaterRender.TILE
+			tex.Color3 = Color3.new(1, 1, 1)
+			tex.Texture = WaterRender.TEXTURE
+			tex.Parent = part -- STATIC: no OffsetStuds animation (unlike streamed water)
+		end
+	else
+		part.TextureID = TextureAtlas.ENABLED and TextureAtlas.ASSET_ID or ""
+	end
 	return part
 end
 

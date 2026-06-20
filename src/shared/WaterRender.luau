@@ -272,6 +272,7 @@ local function waterPart(): Part
 	p.CanCollide = false
 	p.CanQuery = false
 	p.CanTouch = false
+	p.CastShadow = false -- water never casts shadows (avoids dark patches under shorelines)
 	p.Color = WaterRender.COLOR
 	p.TopSurface = Enum.SurfaceType.Smooth
 	p.BottomSurface = Enum.SurfaceType.Smooth

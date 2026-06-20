@@ -21,7 +21,7 @@ local function run(): (number, number)
 	local degenerate = false
 	local checkedTypes: { [string]: boolean } = {}
 	for material = 1, 16 do
-		local i = material - 1
+		local i = TextureAtlas.MAT_TO_SLOT[material] -- atlas slot != material-1 (see ATLAS_ORDER)
 		local mbx, mby = (i % 4) * 256, math.floor(i / 4) * 256
 		for _, ft in faceTypes do
 			local r = REGION[ft]

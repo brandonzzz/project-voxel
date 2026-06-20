@@ -3,8 +3,9 @@
 	VoxelClient — runtime entry point (StarterPlayerScripts). Builds the client
 	store + generator + ChunkManager and streams terrain around the camera.
 
-	Streams render + collision + water around the camera, applies edit deltas, and
-	hosts the place/remove/explode tool. Exposes the manager at _G.VoxelChunkManager.
+	Streams render + collision + water around the character and binds the
+	LegacyVoxelTerrain API to this local replica. Exposes the manager at _G.VoxelChunkManager.
+	(No remotes: the terrain system creates none, so there is no edit-delta replication here.)
 ]]
 
 local Players = game:GetService("Players")
@@ -16,7 +17,6 @@ local VoxelStore = require(Lib:WaitForChild("VoxelStore"))
 local WorldGen = require(Lib:WaitForChild("WorldGen"))
 local ChunkManager = require(Lib:WaitForChild("ChunkManager"))
 local Collision = require(Lib:WaitForChild("Collision"))
-local EditService = require(Lib:WaitForChild("EditService"))
 local Constants = require(Lib:WaitForChild("Constants"))
 local WaterRender = require(Lib:WaitForChild("WaterRender"))
 local WaterPhysics = require(Lib:WaitForChild("WaterPhysics"))
@@ -132,39 +132,6 @@ LegacyVoxelTerrain.bind({
 	end,
 })
 
--- Apply existing edits to the store BEFORE the first chunk streams, so each chunk's first
--- render already includes them (no base terrain showing first, then edits popping in). Bounded
--- so a slow/absent server can't stall terrain: fall back to streaming base, edits arrive via
--- the EditDeltas backup. ensureGenerated(base+autowedge) then setCell, matching the live path.
-do
-	local remotes = ReplicatedStorage:WaitForChild("VoxelRemotes", 10)
-	local getOverlay = remotes and remotes:FindFirstChild("GetOverlay")
-	if getOverlay then
-		local result: any = nil
-		local done = false
-		task.spawn(function()
-			local ok, deltas = pcall(function()
-				return getOverlay:InvokeServer()
-			end)
-			result = ok and deltas or nil
-			done = true
-		end)
-		local t0 = os.clock()
-		while not done and os.clock() - t0 < 6 do
-			task.wait()
-		end
-		if type(result) == "table" then
-			for _, d in result do
-				local wx, wy, wz, value = d[1], d[2], d[3], d[4]
-				if wx and wy and wz and value then
-					manager:ensureGenerated(VoxelStore.worldToChunk(wx), VoxelStore.worldToChunk(wy), VoxelStore.worldToChunk(wz))
-					store:setCell(wx, wy, wz, Constants.unpackCell(value))
-				end
-			end
-		end
-	end
-end
-
 manager:start()
 WaterRender.startScroll(water)
 
@@ -190,84 +157,3 @@ player.CharacterAdded:Connect(placeCharacter)
 if player.Character then
 	placeCharacter(player.Character)
 end
-
--- Edit replication + tool ---------------------------------------------------
-local UserInputService = game:GetService("UserInputService")
-local remotes = ReplicatedStorage:WaitForChild("VoxelRemotes")
-local EditDeltas = remotes:WaitForChild("EditDeltas")
-local RequestEdit = remotes:WaitForChild("RequestEdit")
-local RequestExplode = remotes:WaitForChild("RequestExplode")
-
-local FACE_DIR = {
-	Vector3.new(1, 0, 0),
-	Vector3.new(-1, 0, 0),
-	Vector3.new(0, 1, 0),
-	Vector3.new(0, -1, 0),
-	Vector3.new(0, 0, 1),
-	Vector3.new(0, 0, -1),
-}
-
--- Apply broadcast deltas to the local store and dirty-rebuild affected chunks.
-EditDeltas.OnClientEvent:Connect(function(deltas)
-	local affected: { [string]: { cx: number, cy: number, cz: number } } = {}
-	for _, d in deltas do
-		local wx, wy, wz, value = d[1], d[2], d[3], d[4]
-		manager:ensureGenerated( -- base first, so the edit isn't clobbered
-			VoxelStore.worldToChunk(wx),
-			VoxelStore.worldToChunk(wy),
-			VoxelStore.worldToChunk(wz)
-		)
-		store:setCell(wx, wy, wz, Constants.unpackCell(value))
-		for _, c in EditService.affectedChunks(wx, wy, wz) do
-			affected[c.cx .. "_" .. c.cy .. "_" .. c.cz] = { cx = c.cx, cy = c.cy, cz = c.cz }
-		end
-	end
-	for _, c in affected do
-		manager:ensureGenerated(c.cx, c.cy, c.cz)
-		manager:markDirty(c.cx, c.cy, c.cz)
-	end
-end)
-
--- DDA pick under the mouse (no physics raycast).
-local function pickCell(): Collision.Hit?
-	local cam = workspace.CurrentCamera
-	if not cam then
-		return nil
-	end
-	local mp = UserInputService:GetMouseLocation()
-	local ray = cam:ViewportPointToRay(mp.X, mp.Y)
-	return Collision.rayMarch(store, ray.Origin, ray.Direction, 90)
-end
-
--- Left click = remove, Q = place, E = explode (all under the cursor).
--- DISABLED: mouse/keyboard terrain editing is turned off. The remotes + pick logic are kept for
--- future tooling (e.g. part-representation placement); flip this flag to re-enable the build tools.
-local TERRAIN_EDIT_TOOLS_ENABLED = false
-UserInputService.InputBegan:Connect(function(input, processed)
-	if processed or not TERRAIN_EDIT_TOOLS_ENABLED then
-		return
-	end
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		local hit = pickCell()
-		if hit then
-			RequestEdit:FireServer(hit.cellX, hit.cellY, hit.cellZ, 0, 0)
-		end
-	elseif input.KeyCode == Enum.KeyCode.Q then
-		local hit = pickCell()
-		if hit and hit.face >= 1 then
-			local dir = FACE_DIR[hit.face]
-			RequestEdit:FireServer(
-				hit.cellX + dir.X,
-				hit.cellY + dir.Y,
-				hit.cellZ + dir.Z,
-				Constants.Material.Brick,
-				Constants.packByte1(Constants.Shape.Solid, 0)
-			)
-		end
-	elseif input.KeyCode == Enum.KeyCode.E then
-		local hit = pickCell()
-		if hit then
-			RequestExplode:FireServer(hit.cellX, hit.cellY, hit.cellZ, 4)
-		end
-	end
-end)

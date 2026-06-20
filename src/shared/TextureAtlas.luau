@@ -2,8 +2,11 @@
 --[[
 	TextureAtlas — UV-rect math for the textured render mode (P4).
 
-	One 1024x1024 atlas, 16 material spaces of 256px (reading order: col=i%4,
-	row=floor(i/4), i=material-1). Within each material space, 4 regions:
+	One 1024x1024 atlas, 16 material spaces of 256px (reading order: col=slot%4,
+	row=floor(slot/4)). The atlas tile ORDER does NOT match the CellMaterial/Constants.Material
+	id order (metals + plastics/wood are grouped differently in the image), so a hardcoded
+	ATLAS_ORDER table maps each material id -> its 0-based slot. Empty + Water have no atlas
+	tile. Within each material space, 4 regions:
 	  TOP    origin (8,8)    size 160x160  40px/voxel -> 4-voxel tiling period
 	  SIDE   origin (184,8)  size 64x160   32px/voxel -> 2 wide; top 32px strip is
 	         the grass-fringe variant (used when the voxel's top face is exposed)
@@ -17,7 +20,26 @@
 	arithmetic per region is the calibration knob (PHASE), tuned visually.
 ]]
 
+local Constants = require(script.Parent.Constants)
+local M = Constants.Material
+
 local TextureAtlas = {}
+
+-- Atlas IMAGE tile order (reading order, left->right then top->bottom). This is NOT the
+-- material-id order: the image groups the metals as Aluminum/Gold/Iron and puts the plastics
+-- before the wood/gravel/stone block. Edit this list to match the atlas asset, NOT the enum.
+local ATLAS_ORDER = {
+	M.Grass, M.Sand, M.Brick, M.Granite,
+	M.Asphalt, M.Aluminum, M.Gold, M.Iron,
+	M.RedPlastic, M.BluePlastic, M.WoodPlank, M.WoodLog,
+	M.Gravel, M.CinderBlock, M.MossyStone, M.Cement,
+}
+-- material id -> 0-based atlas slot. Materials not on the atlas (Empty, Water) are absent.
+local MAT_TO_SLOT: { [number]: number } = {}
+for slot, mat in ATLAS_ORDER do
+	MAT_TO_SLOT[mat] = slot - 1
+end
+TextureAtlas.MAT_TO_SLOT = MAT_TO_SLOT
 
 TextureAtlas.ENABLED = true
 TextureAtlas.ASSET_ID = "rbxassetid://139235247401983"
@@ -54,7 +76,7 @@ TextureAtlas.PHASE = {
 }
 
 local function matBase(material: number): (number, number)
-	local i = material - 1
+	local i = MAT_TO_SLOT[material] or 0 -- non-atlas materials (Empty/Water) fall back to slot 0
 	return (i % 4) * MAT, math.floor(i / 4) * MAT
 end
 

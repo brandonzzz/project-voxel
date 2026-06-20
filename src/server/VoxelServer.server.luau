@@ -1,12 +1,14 @@
 --!strict
 --[[
-	VoxelServer — authoritative edit owner.
+	VoxelServer — authoritative store owner: persistence, collision streaming, data-driven no-clip.
 
-	The base terrain is deterministic f(seed) (the client computes the same), so
-	the server only owns + replicates the sparse EDIT overlay. It validates edit /
-	explosion requests (reach check), applies them to its authoritative store
-	(lazily generating base terrain for touched chunks), and broadcasts the
-	resulting deltas to all clients. Clients apply the deltas and dirty-rebuild.
+	The base terrain is deterministic f(seed) (every client computes the same). The server owns the
+	sparse EDIT overlay (persisted only in private servers), carves craters under Explosion instances,
+	streams terrain collision around players for server-simulated parts, and resolves no-clip from voxel
+	occupancy. Edits are applied through the LegacyVoxelTerrain API (which updates the store + overlay).
+
+	It creates NO RemoteEvents/RemoteFunctions: there is no built-in cross-client replication of edits.
+	If a game needs clients to see server-side edits, it wires its own networking on top of the API.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -21,26 +23,6 @@ local Constants = require(Lib:WaitForChild("Constants"))
 local PersistenceService = require(Lib:WaitForChild("PersistenceService"))
 
 local CELL = Constants.CELL
-local REACH = 90 -- studs; max distance a player may edit from
-
--- Remotes ------------------------------------------------------------------
-local remotes = Instance.new("Folder")
-remotes.Name = "VoxelRemotes"
-local EditDeltas = Instance.new("RemoteEvent")
-EditDeltas.Name = "EditDeltas"
-EditDeltas.Parent = remotes
-local RequestEdit = Instance.new("RemoteEvent")
-RequestEdit.Name = "RequestEdit"
-RequestEdit.Parent = remotes
-local RequestExplode = Instance.new("RemoteEvent")
-RequestExplode.Name = "RequestExplode"
-RequestExplode.Parent = remotes
--- Pull the full edit overlay synchronously at join, BEFORE the client streams, so each chunk's
--- first render already includes edits (no base-then-edit pop-in).
-local GetOverlay = Instance.new("RemoteFunction")
-GetOverlay.Name = "GetOverlay"
-GetOverlay.Parent = remotes
-remotes.Parent = ReplicatedStorage
 
 -- Authoritative state -------------------------------------------------------
 local store = VoxelStore.new()
@@ -107,47 +89,8 @@ local function recordEdit(wx: number, wy: number, wz: number, value: number)
 	chunkEdits[VoxelStore.localIndex(lx, ly, lz)] = value
 end
 
-local function withinReach(player: Player, wx: number, wy: number, wz: number): boolean
-	local char = player.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
-	if not hrp then
-		return false
-	end
-	local center = Vector3.new((wx + 0.5) * CELL, (wy + 0.5) * CELL, (wz + 0.5) * CELL)
-	return (center - hrp.Position).Magnitude <= REACH
-end
-
-local function asInt(v: any): number?
-	return typeof(v) == "number" and math.floor(v) or nil
-end
-
-RequestEdit.OnServerEvent:Connect(function(player, wx, wy, wz, material, byte1)
-	wx, wy, wz = asInt(wx), asInt(wy), asInt(wz)
-	material, byte1 = asInt(material), asInt(byte1)
-	if not (wx and wy and wz and material and byte1) then
-		return
-	end
-	material = math.clamp(material, 0, Constants.MAX_MATERIAL)
-	byte1 = math.clamp(byte1, 0, 255)
-	if not withinReach(player, wx, wy, wz) then
-		return
-	end
-	local cx = VoxelStore.worldToChunk(wx)
-	local cy = VoxelStore.worldToChunk(wy)
-	local cz = VoxelStore.worldToChunk(wz)
-	ensureWorld(cx, cy, cz) -- base+autowedge+existing edits first, so this edit lands on top
-	local delta = EditService.applyEdit(store, wx, wy, wz, material, byte1)
-	recordEdit(delta[1], delta[2], delta[3], delta[4])
-	EditDeltas:FireAllClients({ delta })
-	if streamer then
-		for _, c in EditService.affectedChunks(delta[1], delta[2], delta[3]) do
-			streamer:markDirty(c.cx, c.cy, c.cz)
-		end
-	end
-end)
-
--- Carve a crater, re-autowedge its rim, and broadcast the deltas. Shared by the player
--- explode tool and by auto-detected Explosion instances; callers do their own validation.
+-- Carve a crater and re-autowedge its rim, applying it to the authoritative store + overlay.
+-- Triggered by auto-detected Explosion instances. (No client broadcast: there are no remotes.)
 local function detonate(wx: number, wy: number, wz: number, radius: number)
 	radius = math.clamp(radius, 1, 8)
 	-- Prepare the whole crater region FIRST (base + deterministic autowedge + existing saved
@@ -183,7 +126,6 @@ local function detonate(wx: number, wy: number, wz: number, radius: number)
 		deltas[#deltas + 1] = d
 	end
 
-	EditDeltas:FireAllClients(deltas)
 	if streamer then
 		for ccx = c0x, c1x do
 			for ccy = c0y, c1y do
@@ -194,18 +136,6 @@ local function detonate(wx: number, wy: number, wz: number, radius: number)
 		end
 	end
 end
-
-RequestExplode.OnServerEvent:Connect(function(player, wx, wy, wz, radius)
-	wx, wy, wz = asInt(wx), asInt(wy), asInt(wz)
-	if not (wx and wy and wz) then
-		return
-	end
-	radius = math.clamp(typeof(radius) == "number" and radius or 3, 1, 8)
-	if not withinReach(player, wx, wy, wz) then
-		return
-	end
-	detonate(wx, wy, wz, radius)
-end)
 
 -- Auto-detect Roblox Explosion instances and carve a matching crater. An Explosion
 -- detonates the instant it is parented into the workspace, so a DescendantAdded hook
@@ -308,7 +238,6 @@ end)
 -- and load() are no-ops). A reserved/VIP private server has a non-empty game.PrivateServerId; a
 -- public server leaves it "".
 local editDS: any = nil
-local dsReady = false
 if game.PrivateServerId ~= "" then
 	local ok, ds = pcall(function()
 		return DataStoreService:GetDataStore("VoxelEdits_v1", game.PrivateServerId) -- scope = this private server
@@ -340,7 +269,6 @@ local function save(): number
 	pcall(function()
 		editDS:SetAsync("regions_index", index)
 	end)
-	dsReady = true
 	return saved
 end
 
@@ -352,7 +280,6 @@ local function load()
 		return editDS:GetAsync("regions_index")
 	end)
 	if not ok or type(index) ~= "table" then
-		dsReady = true
 		return
 	end
 	for _, rkey in index do
@@ -367,44 +294,7 @@ local function load()
 			end
 		end
 	end
-	dsReady = true
 end
-
--- Flatten the overlay into a delta list for replicating existing edits to joiners.
-local function overlayDeltas(): { { number } }
-	local out: { { number } } = {}
-	for chunkKey, edits in overlay do
-		local cx, cy, cz = string.match(chunkKey, "(-?%d+)_(-?%d+)_(-?%d+)")
-		local cxi, cyi, czi = tonumber(cx) :: number, tonumber(cy) :: number, tonumber(cz) :: number
-		for idx, val in edits do
-			local lx = idx % Constants.CHUNK
-			local lz = math.floor(idx / Constants.CHUNK) % Constants.CHUNK
-			local ly = math.floor(idx / (Constants.CHUNK * Constants.CHUNK))
-			out[#out + 1] = { cxi * Constants.CHUNK + lx, cyi * Constants.CHUNK + ly, czi * Constants.CHUNK + lz, val }
-		end
-	end
-	return out
-end
-
--- Client calls this once at startup (before it streams) to get all existing edits up front,
--- so the first render of each chunk includes them. Waits (bounded) for the datastore load.
-GetOverlay.OnServerInvoke = function(_player)
-	local t0 = os.clock()
-	while not dsReady and os.clock() - t0 < 5 do
-		task.wait(0.1)
-	end
-	return overlayDeltas()
-end
-
--- Backup for any edits made during the join window (also covers an old client that doesn't
--- call GetOverlay): re-broadcast the overlay shortly after join; the client applies + rebuilds.
-Players.PlayerAdded:Connect(function(player)
-	task.wait(2) -- let the client's EditDeltas listener come up
-	local d = overlayDeltas()
-	if #d > 0 then
-		EditDeltas:FireClient(player, d)
-	end
-end)
 
 task.spawn(function()
 	while true do
@@ -417,7 +307,6 @@ game:BindToClose(function()
 end)
 
 load()
-remotes:SetAttribute("ready", true)
 
 -- Server-side terrain collision -------------------------------------------------
 -- The server has no render meshes, so without this server-simulated parts (loose debris
@@ -498,8 +387,8 @@ end)
 
 -- Expose the classic-terrain API (LegacyVoxelTerrain.GetCell/SetCell/...) on the AUTHORITATIVE server
 -- store: an edit generates base terrain for touched chunks, rebuilds the server collision for the
--- affected chunks, records the edit overlay, and broadcasts the deltas to all clients (the same path
--- RequestEdit uses). Note: a very large SetCells fans out one delta per cell -- prefer modest regions.
+-- affected chunks, and records the edit into the (persisted) overlay. There is NO client broadcast --
+-- the system creates no remotes; layer your own networking on top if clients must see server edits.
 local LegacyVoxelTerrain = require(Lib)
 LegacyVoxelTerrain.bind({
 	store = store,
@@ -513,6 +402,5 @@ LegacyVoxelTerrain.bind({
 		for _, d in deltas do
 			recordEdit(d[1], d[2], d[3], d[4])
 		end
-		EditDeltas:FireAllClients(deltas)
 	end,
 })

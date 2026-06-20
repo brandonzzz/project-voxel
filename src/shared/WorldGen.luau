@@ -1,8 +1,9 @@
 --!strict
 --[[
 	WorldGen — seed-based terrain generation (the f(seed) half of the persistence
-	model). Heights are clamped into the cy=0 chunk band (cells 0..15) so M4
-	streaming is a 2D grid of chunks; deeper/vertical chunks come later.
+	model). Surface heights span the full vertical streaming range (clamped 1..MAX_HEIGHT,
+	not the old single cy=0 band) so raising GEN.amplitude makes hills that rise past
+	cellY=15 into the chunks above; the 3D streaming sphere generates them on demand.
 
 	Generation is parameterised by Constants.GEN (type / period / amplitude /
 	flatHeight). Config is read from Constants so the server and all clients agree
@@ -21,7 +22,12 @@ local Constants = require(script.Parent.Constants)
 local CHUNK = Constants.CHUNK
 local M = Constants.Material
 local SOLID = Constants.packByte1(Constants.Shape.Solid, 0)
-local SEA_LEVEL = 10 -- cells; columns lower than this fill with still water
+local SEA_LEVEL = 13 -- cells; columns lower than this fill with still water
+-- Upper bound for a generated surface column. Generous so GEN.amplitude (not a band cap)
+-- governs hill height -- terrain can rise into the vertical chunks above cy=0. Lower bound 1
+-- keeps at least one solid floor cell. Default amplitude (~3.5) peaks near 15, so default
+-- terrain is unchanged; only larger amplitudes reach higher.
+local MAX_HEIGHT = 60
 
 local WorldGen = {}
 WorldGen.__index = WorldGen
@@ -47,7 +53,7 @@ end
 function WorldGen.heightAt(self: WorldGen, wx: number, wz: number): number
 	local cfg = self.config
 	if cfg.type == "flat" then
-		return math.clamp(math.floor(cfg.flatHeight), 1, 15)
+		return math.clamp(math.floor(cfg.flatHeight), 1, MAX_HEIGHT)
 	end
 	local s = self.seed * 0.1
 	local p = cfg.period
@@ -55,7 +61,7 @@ function WorldGen.heightAt(self: WorldGen, wx: number, wz: number): number
 	local dp = p * 0.2917
 	local broad = math.noise(wx / p + s, wz / p + s * 1.7)
 	local detail = math.noise(wx / dp + s * 2.3, wz / dp + s * 0.9) * 0.4
-	return math.clamp(math.floor(7 + (broad + detail + 1) * cfg.amplitude), 1, 15)
+	return math.clamp(math.floor(7 + (broad + detail + 1) * cfg.amplitude), 1, MAX_HEIGHT)
 end
 
 -- Fill one chunk's cells from the heightmap. Returns true if anything solid was written. --
