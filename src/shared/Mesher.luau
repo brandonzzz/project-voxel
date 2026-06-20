@@ -657,31 +657,55 @@ local function oneCellTris(shape: number, material: number): { Tri }
 	return tris
 end
 
--- Baked single-voxel render templates, keyed by shape*256 + material. Kept nil-parented and never
--- destroyed; sampleVoxel clones one per call (a clone is ~free vs the ~27 ms bake). --
-local sampleCache: { [number]: MeshPart } = {}
+-- Baked single-voxel STATIC content, keyed by shape*256 + material. fillAndBake builds an EditableMesh,
+-- bakes it to immutable content with CreateDataModelContentAsync, and DESTROYS the EditableMesh -- so a
+-- cached entry holds zero Editable* memory budget (the same EM -> bake -> destroy cycle the chunk
+-- renderer uses). Each sampleVoxel call then spins a fresh MeshPart off the cached static content. --
+local sampleCache: { [number]: Content } = {}
 
--- Bake (once, then cache) a single voxel of `shape`+`material` at orientation 0, centred on the cell,
--- and return a FRESH UNPARENTED, ANCHORED MeshPart with DEFAULT collision fidelity (CanCollide is left
--- at its default of true) -- for part representations of voxels (debris, picked-up blocks, previews).
--- The mesh is centred on the cell so the caller positions the part by the voxel centre; rotate the
--- part's CFrame for non-zero
--- orientations. No cube-pinning, so the collision geometry matches the actual shape (not a full cube). --
+-- Serialize first-time sample bakes. fillAndBake yields (CreateDataModelContentAsync), so concurrent
+-- callers -- e.g. a parts palette that task.spawns one preview per material -- would each create an
+-- EditableMesh before any is destroyed, stacking N live editables and blowing the Editable* memory
+-- budget. This gate keeps at most ONE sample bake in flight; cached combos skip it entirely (just a
+-- CreateMeshPartAsync off the already-baked static content). Cooperative single-thread, so a plain flag
+-- suffices: a waiter only re-enters after the holder cleared the flag with no yield in between. --
+local baking = false
+
+-- Bake (once, then cache) a single voxel of `shape`+`material` at orientation 0 to STATIC content, then
+-- return a FRESH UNPARENTED, ANCHORED MeshPart built from it (DEFAULT collision fidelity; CanCollide is
+-- left at its default of true) -- for part representations of voxels (debris, picked-up blocks,
+-- previews). The mesh is centred on the cell, so the caller positions the part by the voxel centre and
+-- rotates the part's CFrame for non-zero orientations. No cube-pinning, so the collision geometry
+-- matches the actual shape (not a full cube). --
 function Mesher.sampleVoxel(shape: number, material: number): MeshPart
 	local key = shape * 256 + material
-	local template = sampleCache[key]
-	if not template then
-		local baked = fillAndBake(oneCellTris(shape, material), nil, nil, Vector3.zero, nil)
-		if not baked then
-			error(string.format("Mesher.sampleVoxel: shape %d produced no geometry", shape))
+	local baked = sampleCache[key]
+	if not baked then
+		while baking do
+			task.wait() -- another sample is baking; wait so only one EditableMesh is ever live
 		end
-		template = AssetService:CreateMeshPartAsync(baked, { CollisionFidelity = Enum.CollisionFidelity.Default })
-		template.Name = string.format("Voxel_%d_%d", shape, material)
-		template.Anchored = true
-		template.TextureID = TextureAtlas.ENABLED and TextureAtlas.ASSET_ID or ""
-		sampleCache[key] = template
+		baked = sampleCache[key] -- a waiter ahead of us may have just baked this same combo
+		if not baked then
+			-- EditableMesh -> static content -> destroy the EditableMesh, all inside fillAndBake, so
+			-- nothing lingers on the Editable* budget once the static content is cached.
+			baking = true
+			local ok, result = pcall(fillAndBake, oneCellTris(shape, material), nil, nil, Vector3.zero, nil)
+			baking = false -- always clear, even on failure, so the gate can't deadlock
+			if not ok then
+				error("Mesher.sampleVoxel: bake failed -- " .. tostring(result))
+			end
+			if not result then
+				error(string.format("Mesher.sampleVoxel: shape %d produced no geometry", shape))
+			end
+			baked = result
+			sampleCache[key] = baked
+		end
 	end
-	return template:Clone()
+	local part = AssetService:CreateMeshPartAsync(baked, { CollisionFidelity = Enum.CollisionFidelity.Default })
+	part.Name = string.format("Voxel_%d_%d", shape, material)
+	part.Anchored = true
+	part.TextureID = TextureAtlas.ENABLED and TextureAtlas.ASSET_ID or ""
+	return part
 end
 
 export type RebuildStats = { tris: number, verts: number, split: boolean, parts: number, buildMs: number }
