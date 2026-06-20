@@ -118,6 +118,20 @@ manager = ChunkManager.new({
 	end,
 })
 
+-- Expose the classic-terrain API (LegacyVoxelTerrain.GetCell/SetCell/...) on this CLIENT replica:
+-- edits write the local store + rebuild render/collision/water for the affected chunks. No onDeltas --
+-- the client replica is local; route edits through the server (authoritative) if replication is needed.
+local LegacyVoxelTerrain = require(Lib)
+LegacyVoxelTerrain.bind({
+	store = store,
+	ensureGenerated = function(cx, cy, cz)
+		manager:ensureGenerated(cx, cy, cz)
+	end,
+	markDirty = function(cx, cy, cz)
+		manager:markDirty(cx, cy, cz)
+	end,
+})
+
 -- Apply existing edits to the store BEFORE the first chunk streams, so each chunk's first
 -- render already includes them (no base terrain showing first, then edits popping in). Bounded
 -- so a slow/absent server can't stall terrain: fall back to streaming base, edits arrive via

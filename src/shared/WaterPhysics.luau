@@ -15,12 +15,15 @@ local WaterRender = require(script.Parent.WaterRender)
 local CELL = Constants.CELL
 local WATER = Constants.Material.Water
 
--- byte1 bits 3-4 = flow direction (legacy SetWaterCell), bits 0-2 = flow force.
+-- Water byte1: bits 0-2 = flow force, bits 3-5 = flow direction (legacy SetWaterCell). Indexed by the
+-- legacy Enum.WaterDirection value (NegX=0, X=1, NegY=2, Y=3, NegZ=4, Z=5). See Constants.unpackWater.
 local FLOW_DIR = {
-	[0] = Vector3.new(0, 0, -1), -- NegZ
+	[0] = Vector3.new(-1, 0, 0), -- NegX
 	[1] = Vector3.new(1, 0, 0), -- X
-	[2] = Vector3.new(0, 0, 1), -- Z
-	[3] = Vector3.new(-1, 0, 0), -- NegX
+	[2] = Vector3.new(0, -1, 0), -- NegY
+	[3] = Vector3.new(0, 1, 0), -- Y
+	[4] = Vector3.new(0, 0, -1), -- NegZ
+	[5] = Vector3.new(0, 0, 1), -- Z
 }
 
 local WaterPhysics = {}
@@ -96,11 +99,10 @@ function WaterPhysics.attach(store, character: Model): () -> ()
 			-- flow only from real water cells (a slope's byte1 holds shape bits, not flow)
 			local flow = Vector3.zero
 			if mat == WATER then
-				local forceBits = byte1 % 8
-				local dirBits = math.floor(byte1 / 8) % 4
-				flow = FLOW_DIR[dirBits] * (forceBits * mass * 3)
+				local force, dir = Constants.unpackWater(byte1)
+				flow = (FLOW_DIR[dir] or Vector3.zero) * (force * mass * 3)
 			end
-			vf.Force = Vector3.new(flow.X + dragX, up, flow.Z + dragZ)
+			vf.Force = Vector3.new(flow.X + dragX, up + flow.Y, flow.Z + dragZ)
 			setInWater(true)
 			if humanoid:GetState() ~= Enum.HumanoidStateType.Swimming then
 				humanoid:ChangeState(Enum.HumanoidStateType.Swimming)

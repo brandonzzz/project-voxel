@@ -121,6 +121,18 @@ function Constants.unpackByte1(byte1: number): (number, number)
 	return band(byte1, 0x7), band(rshift(byte1, 3), 0x3)
 end
 
+-- Water flow byte1: force in bits 0-2, direction in bits 3-5 (3 bits each). Unlike the solid layout
+-- (2-bit orientation), water needs 3 direction bits to hold all 6 legacy WaterDirection values
+-- (NegX, X, NegY, Y, NegZ, Z). Only water cells use this; solids use packByte1. WaterForce 0-4 and
+-- WaterDirection 0-5 both fit 3 bits. --
+function Constants.packWater(force: number, direction: number): number
+	return bor(band(force, 0x7), lshift(band(direction, 0x7), 3))
+end
+
+function Constants.unpackWater(byte1: number): (number, number)
+	return band(byte1, 0x7), band(rshift(byte1, 3), 0x7)
+end
+
 -- Convenience: pack a full 16-bit cell value (material + byte1*256). --
 function Constants.packCell(material: number, byte1: number): number
 	return band(material, 0xFF) + band(byte1, 0xFF) * 256

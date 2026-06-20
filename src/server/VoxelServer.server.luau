@@ -495,3 +495,24 @@ task.spawn(function()
 		LoosePartManager.updateOwnershipGroups()
 	end
 end)
+
+-- Expose the classic-terrain API (LegacyVoxelTerrain.GetCell/SetCell/...) on the AUTHORITATIVE server
+-- store: an edit generates base terrain for touched chunks, rebuilds the server collision for the
+-- affected chunks, records the edit overlay, and broadcasts the deltas to all clients (the same path
+-- RequestEdit uses). Note: a very large SetCells fans out one delta per cell -- prefer modest regions.
+local LegacyVoxelTerrain = require(Lib)
+LegacyVoxelTerrain.bind({
+	store = store,
+	ensureGenerated = ensureWorld,
+	markDirty = function(cx: number, cy: number, cz: number)
+		if streamer then
+			streamer:markDirty(cx, cy, cz)
+		end
+	end,
+	onDeltas = function(deltas)
+		for _, d in deltas do
+			recordEdit(d[1], d[2], d[3], d[4])
+		end
+		EditDeltas:FireAllClients(deltas)
+	end,
+})
