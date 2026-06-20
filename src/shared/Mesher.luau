@@ -662,9 +662,10 @@ end
 local sampleCache: { [number]: MeshPart } = {}
 
 -- Bake (once, then cache) a single voxel of `shape`+`material` at orientation 0, centred on the cell,
--- and return a FRESH UNPARENTED MeshPart with DEFAULT collision fidelity and CanCollide = true -- for
--- part representations of voxels (debris, picked-up blocks, previews). The mesh is centred on the cell
--- so the caller positions the part by the voxel centre; rotate the part's CFrame for non-zero
+-- and return a FRESH UNPARENTED, ANCHORED MeshPart with DEFAULT collision fidelity (CanCollide is left
+-- at its default of true) -- for part representations of voxels (debris, picked-up blocks, previews).
+-- The mesh is centred on the cell so the caller positions the part by the voxel centre; rotate the
+-- part's CFrame for non-zero
 -- orientations. No cube-pinning, so the collision geometry matches the actual shape (not a full cube). --
 function Mesher.sampleVoxel(shape: number, material: number): MeshPart
 	local key = shape * 256 + material
@@ -676,7 +677,7 @@ function Mesher.sampleVoxel(shape: number, material: number): MeshPart
 		end
 		template = AssetService:CreateMeshPartAsync(baked, { CollisionFidelity = Enum.CollisionFidelity.Default })
 		template.Name = string.format("Voxel_%d_%d", shape, material)
-		template.CanCollide = true
+		template.Anchored = true
 		template.TextureID = TextureAtlas.ENABLED and TextureAtlas.ASSET_ID or ""
 		sampleCache[key] = template
 	end
