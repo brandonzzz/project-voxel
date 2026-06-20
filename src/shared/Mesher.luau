@@ -634,11 +634,14 @@ local function applyOrCreate(container: Instance, name: string, baked: Content, 
 	end
 end
 
--- Triangles for ONE isolated voxel (all faces, no culling) of `shape`+`material` at orientation 0,
--- centred on the cell origin (verts are already cell-centre-relative, +/- HALF_CELL). --
+-- Triangles for ONE isolated voxel (all faces, no culling) of `shape`+`material` at STORED orientation
+-- 0, centred on the cell origin (verts are already cell-centre-relative, +/- HALF_CELL). Apply the
+-- stored->geometry remap (geomOrientation) just like the terrain cull does, so a sampled corner /
+-- inverse-corner / horizontal wedge renders at the same facing as it does in terrain (Solid + vertical
+-- wedge remap to identity, so they are unaffected). --
 local function oneCellTris(shape: number, material: number): { Tri }
 	local tris: { Tri } = {}
-	for _, t in hullTriangles(shape, 0) do
+	for _, t in hullTriangles(shape, geomOrientation(shape, 0)) do
 		tris[#tris + 1] = {
 			p1 = t.a,
 			p2 = t.b,
