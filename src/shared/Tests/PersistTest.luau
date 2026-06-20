@@ -67,10 +67,12 @@ local function run(): (number, number)
 			"region serialize -> apply restores edited cells across chunks")
 	end
 
-	-- T4: WorldGen produces water -------------------------------------------
+	-- T4: WorldGen floods low areas with water. Use an explicit LOW flat config (surface below sea
+	-- level) so this is independent of the live Constants.GEN -- which may be a dry plateau ABOVE sea
+	-- level (then there is legitimately no water) -- and tests the flooding mechanism itself.
 	do
 		local store = VoxelStore.new()
-		local gen = WorldGen.new(Constants.WORLD_SEED)
+		local gen = WorldGen.new(Constants.WORLD_SEED, { type = "flat", flatHeight = 1 })
 		local water = 0
 		for cx = 0, 3 do
 			for cz = 0, 3 do

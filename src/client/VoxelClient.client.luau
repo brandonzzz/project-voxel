@@ -3,9 +3,9 @@
 	VoxelClient — runtime entry point (StarterPlayerScripts). Builds the client
 	store + generator + ChunkManager and streams terrain around the camera.
 
-	Streams render + collision + water around the character and binds the
-	LegacyVoxelTerrain API to this local replica. Exposes the manager at _G.VoxelChunkManager.
-	(No remotes: the terrain system creates none, so there is no edit-delta replication here.)
+	Streams render + collision + water around the character and binds the LegacyVoxelTerrain API to
+	this local replica. Applies the server's authoritative edits (read-only) via the EditDeltas remote
+	(+ a GetOverlay pull at join); the client never sends edits. Exposes the manager at _G.VoxelChunkManager.
 ]]
 
 local Players = game:GetService("Players")
@@ -17,6 +17,7 @@ local VoxelStore = require(Lib:WaitForChild("VoxelStore"))
 local WorldGen = require(Lib:WaitForChild("WorldGen"))
 local ChunkManager = require(Lib:WaitForChild("ChunkManager"))
 local Collision = require(Lib:WaitForChild("Collision"))
+local EditService = require(Lib:WaitForChild("EditService"))
 local Constants = require(Lib:WaitForChild("Constants"))
 local WaterRender = require(Lib:WaitForChild("WaterRender"))
 local WaterPhysics = require(Lib:WaitForChild("WaterPhysics"))
@@ -132,6 +133,44 @@ LegacyVoxelTerrain.bind({
 	end,
 })
 
+-- Pull the authoritative edit overlay BEFORE the first chunk streams (read-only -- the client has no
+-- authority), so each chunk's first render already includes edits (no base-then-edit pop-in). Bounded
+-- so a slow/absent server can't stall terrain: fall back to streaming base; edits then arrive via the
+-- EditDeltas backup. ensureGenerated(base+autowedge) then setCell, matching the live path.
+do
+	local remotes = ReplicatedStorage:WaitForChild("VoxelRemotes", 10)
+	local getOverlay = remotes and remotes:FindFirstChild("GetOverlay")
+	if getOverlay then
+		local result: any = nil
+		local done = false
+		task.spawn(function()
+			local ok, deltas = pcall(function()
+				return getOverlay:InvokeServer()
+			end)
+			result = ok and deltas or nil
+			done = true
+		end)
+		local t0 = os.clock()
+		while not done and os.clock() - t0 < 6 do
+			task.wait()
+		end
+		if type(result) == "table" then
+			for _, d in result do
+				local wx, wy, wz, value = d[1], d[2], d[3], d[4]
+				if wx and wy and wz and value then
+					-- worldToChunk returns (chunk, local); bind each to a single var so the extra local
+					-- return can't leak into ensureGenerated's trailing `yielder` param (it would be called).
+					local cx = VoxelStore.worldToChunk(wx)
+					local cy = VoxelStore.worldToChunk(wy)
+					local cz = VoxelStore.worldToChunk(wz)
+					manager:ensureGenerated(cx, cy, cz)
+					store:setCell(wx, wy, wz, Constants.unpackCell(value))
+				end
+			end
+		end
+	end
+end
+
 manager:start()
 WaterRender.startScroll(water)
 
@@ -157,3 +196,28 @@ player.CharacterAdded:Connect(placeCharacter)
 if player.Character then
 	placeCharacter(player.Character)
 end
+
+-- Server -> client replication (read-only): apply broadcast edit deltas to the local store and
+-- dirty-rebuild the affected chunks. The client never sends edits -- the server is authoritative.
+local remotes = ReplicatedStorage:WaitForChild("VoxelRemotes")
+local EditDeltas = remotes:WaitForChild("EditDeltas")
+EditDeltas.OnClientEvent:Connect(function(deltas)
+	local affected: { [string]: { cx: number, cy: number, cz: number } } = {}
+	for _, d in deltas do
+		local wx, wy, wz, value = d[1], d[2], d[3], d[4]
+		-- bind each worldToChunk (chunk, local) to one var; passing the raw call as the trailing
+		-- arg would leak the local coord into ensureGenerated's `yielder` param and crash on call.
+		local cx = VoxelStore.worldToChunk(wx)
+		local cy = VoxelStore.worldToChunk(wy)
+		local cz = VoxelStore.worldToChunk(wz)
+		manager:ensureGenerated(cx, cy, cz) -- base first, so the edit isn't clobbered
+		store:setCell(wx, wy, wz, Constants.unpackCell(value))
+		for _, c in EditService.affectedChunks(wx, wy, wz) do
+			affected[c.cx .. "_" .. c.cy .. "_" .. c.cz] = { cx = c.cx, cy = c.cy, cz = c.cz }
+		end
+	end
+	for _, c in affected do
+		manager:ensureGenerated(c.cx, c.cy, c.cz)
+		manager:markDirty(c.cx, c.cy, c.cz)
+	end
+end)
