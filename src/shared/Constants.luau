@@ -49,10 +49,10 @@ Constants.WORLD_SEED = 2026
 --   amplitude vertical height spread in cells
 --   flatHeight surface cell height used when type == "flat"
 Constants.GEN = {
-	type = "default",
+	type = "flat",
 	period = 48,
-	amplitude = 3.5,
-	flatHeight = 7,
+	amplitude = 7,
+	flatHeight = 12,
 }
 
 -- Material ids (byte 0). 0 = Empty. 17 = Water (special: byte 1 is flow data). --

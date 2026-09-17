@@ -22,7 +22,7 @@ local Constants = require(script.Parent.Constants)
 local CHUNK = Constants.CHUNK
 local M = Constants.Material
 local SOLID = Constants.packByte1(Constants.Shape.Solid, 0)
-local SEA_LEVEL = 13 -- cells; columns lower than this fill with still water
+local SEA_LEVEL = 10 -- cells; columns lower than this fill with still water
 -- Upper bound for a generated surface column. Generous so GEN.amplitude (not a band cap)
 -- governs hill height -- terrain can rise into the vertical chunks above cy=0. Lower bound 1
 -- keeps at least one solid floor cell. Default amplitude (~3.5) peaks near 15, so default

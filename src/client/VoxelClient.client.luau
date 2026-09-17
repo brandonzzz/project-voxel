@@ -22,6 +22,8 @@ local Constants = require(Lib:WaitForChild("Constants"))
 local WaterRender = require(Lib:WaitForChild("WaterRender"))
 local WaterPhysics = require(Lib:WaitForChild("WaterPhysics"))
 local CollectPool = require(Lib:WaitForChild("CollectPool"))
+-- [RECOVERED 2026-09-17] generation authority moved to ReplicatedStorage.TerrainConfig (see RECOVERY.md).
+local TerrainConfig = ReplicatedStorage:WaitForChild("TerrainConfig")
 
 local player = Players.LocalPlayer
 
@@ -56,7 +58,16 @@ water.Name = "Water"
 water.Parent = root
 
 local store = VoxelStore.new()
-local gen = WorldGen.new(Constants.WORLD_SEED)
+-- [RECOVERED 2026-09-17] was WorldGen.new(Constants.WORLD_SEED); now reads TerrainConfig like the
+-- server so f(seed) agrees. STILL MISSING (Studio-only, not recovered): the isInitialized gate --
+-- `repeat task.wait() until TerrainConfig.isInitialized.Value` before streaming, and the setupCharacter
+-- reposition gate `... and TerrainConfig.isInitialized.Value`. See RECOVERY.md §4.
+local gen = WorldGen.new(TerrainConfig.seed.Value, {
+	type = TerrainConfig.type.Value,
+	period = TerrainConfig.period.Value,
+	amplitude = TerrainConfig.amplitude.Value,
+	flatHeight = TerrainConfig.flatHeight.Value,
+})
 
 local camera = Workspace.CurrentCamera
 

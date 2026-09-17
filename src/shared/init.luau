@@ -243,7 +243,7 @@ end
 function T.ghostVoxel(block: any, material: any): MeshPart
 	local part = Mesher.sampleVoxel(val(block), val(material))
 	part.Name = "GhostVoxel"
-	part.Transparency = 0.6
+	part.Transparency = 0.5
 	part.CanCollide = false
 	part.CanQuery = false
 	part.CanTouch = false
